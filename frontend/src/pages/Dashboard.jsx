@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { get, fmtMoney, fmtPct, fmtTime } from '../api.js';
+import { Link } from 'react-router-dom';
+import { get, fmtMoney, fmtPct, fmtNum, fmtTime } from '../api.js';
 import { useApp } from '../context.js';
 import { Card, Stat, Badge, Table, ErrorBox } from '../components/ui.jsx';
 
@@ -27,18 +28,25 @@ export default function Dashboard() {
   const totalTrials = t.completed + t.pruned + t.failed + t.running;
   return (
     <>
-      <div className="page-head"><div><h1>Dashboard</h1><div className="muted">Live figures from the database and running workers</div></div></div>
+      <div className="page-head">
+        <div>
+          <h1>Dashboard</h1>
+          <div className="muted">Live figures from the dynamic custom registries, database ledger, and autonomous workers</div>
+        </div>
+        <div className="card-actions">
+          <Link to="/indicator-studio"><button>+ Indicator Studio</button></Link>
+          <Link to="/strategy-studio"><button className="primary">+ Strategy Studio</button></Link>
+        </div>
+      </div>
       <ErrorBox error={error} />
       <div className="grid stats">
-        <Stat label="Indicators available" value={d.indicators} hint="discovered from the registry" />
-        <Stat label="Strategies discovered" value={d.strategies_discovered} hint={`${d.eligible_strategies} eligible · ${d.validated_strategies} validated`} />
-        <Stat label="Total trials" value={totalTrials} hint="Optuna trials across all runs" />
-        <Stat label="Completed trials" value={t.completed} tone="good" />
-        <Stat label="Running trials" value={t.running} />
-        <Stat label="Pruned trials" value={t.pruned} tone="warn" />
-        <Stat label="Failed trials" value={t.failed} tone={t.failed ? 'bad' : ''} />
-        <Stat label="Best net profit" value={d.best_net_profit === null ? '—' : fmtMoney(d.best_net_profit)} hint="eligible, train split" />
-        <Stat label="Best win rate" value={d.best_win_rate === null ? '—' : fmtPct(d.best_win_rate)} hint="eligible, train split" />
+        <Stat label="Custom Indicators" value={d.indicators} hint={`${d.indicators_total ?? d.indicators} total in studio`} />
+        <Stat label="Custom Strategies" value={d.strategies_registered ?? 0} hint={`${d.strategies_total ?? 0} total in studio`} />
+        <Stat label="Combinations Tested" value={d.strategies_discovered} hint={`${d.eligible_strategies} eligible · ${d.validated_strategies} validated`} />
+        <Stat label="Total Trials" value={totalTrials} hint={`${t.completed} complete · ${t.pruned} pruned · ${t.failed} failed`} />
+        <Stat label="Best Net Profit" value={d.best_net_profit === null ? '—' : fmtMoney(d.best_net_profit)} hint="eligible, train split" />
+        <Stat label="Best Sharpe Ratio" value={d.best_sharpe_ratio === null || d.best_sharpe_ratio === undefined ? '—' : fmtNum(d.best_sharpe_ratio)} hint="annualized, train split" />
+        <Stat label="Best Win Rate" value={d.best_win_rate === null ? '—' : fmtPct(d.best_win_rate)} hint="eligible, train split" />
       </div>
       <div className="split-2" style={{ marginTop: 14 }}>
         <Card title="System status">
@@ -71,7 +79,7 @@ export default function Dashboard() {
             { key: 'message', label: 'Message' },
           ]}
           rows={d.recent_activity}
-          empty="No activity yet. Start the agents or an optimization run."
+          empty="No activity yet. Register indicators or strategies in the Studios, then start the agents or an optimization run."
         />
       </Card>
     </>

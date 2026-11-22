@@ -78,4 +78,48 @@ button.ghost { background: transparent; }
 .ind-card.unavailable { opacity: .65; }
 .mono { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
 .split-2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+.badge.info { background: rgba(79,140,255,.16); color: #8ab4ff; }
+
+/* Studio IDE Layout */
+.studio-shell { display: grid; grid-template-columns: 270px minmax(0, 1fr); gap: 14px; align-items: start; }
+.studio-list { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; display: flex; flex-direction: column; gap: 10px; max-height: calc(100vh - 150px); overflow-y: auto; }
+.studio-item { border: 1px solid var(--line); background: var(--panel2); border-radius: 9px; padding: 10px; cursor: pointer; display: flex; flex-direction: column; gap: 4px; transition: border-color .15s, background .15s; }
+.studio-item:hover { border-color: #364566; }
+.studio-item.active { border-color: var(--accent); background: #1a2640; }
+.studio-item-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+.studio-workspace { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.studio-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.param-row { display: grid; grid-template-columns: 1.2fr 0.7fr 0.8fr 0.8fr 0.8fr 0.7fr auto; gap: 8px; align-items: center; margin-bottom: 6px; }
+
+/* Python Syntax-Highlighted Code Editor */
+.py-editor-wrap { border: 1px solid var(--line); border-radius: 10px; background: #090d14; overflow: hidden; display: flex; flex-direction: column; }
+.py-editor-head { display: flex; justify-content: space-between; align-items: center; padding: 7px 12px; background: #101624; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+.py-editor-body { position: relative; display: grid; grid-template-columns: 46px 1fr; height: 360px; overflow: hidden; }
+.py-gutter { background: #0c111b; border-right: 1px solid var(--line); padding: 12px 6px; text-align: right; font: 13px/20px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #52607a; user-select: none; overflow: hidden; }
+.py-gutter-line { height: 20px; padding-right: 4px; }
+.py-gutter-line.err { color: var(--bad); font-weight: 700; background: rgba(239,68,68,.16); border-radius: 3px; }
+.py-stage { position: relative; overflow: auto; }
+.py-highlight, .py-textarea { margin: 0; padding: 12px 14px; font: 13px/20px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; tab-size: 4; white-space: pre; letter-spacing: normal; word-spacing: normal; border: 0; width: 100%; min-height: 100%; }
+.py-highlight { pointer-events: none; color: #d6deeb; min-width: max-content; }
+.py-textarea { position: absolute; inset: 0; resize: none; background: transparent; color: transparent; caret-color: #4f8cff; outline: none; overflow: auto; }
+.py-textarea::selection { background: rgba(79,140,255,.28); }
+.py-line { min-height: 20px; }
+.py-line.err { background: rgba(239,68,68,.14); }
+.tok-kw { color: #c792ea; font-weight: 600; }
+.tok-bi { color: #82aaff; }
+.tok-dec { color: #ffcb6b; }
+.tok-str { color: #c3e88d; }
+.tok-com { color: #637777; font-style: italic; }
+.tok-num { color: #f78c6c; }
+.tok-fn { color: #82aaff; font-weight: 600; }
+.py-editor-foot { display: flex; justify-content: space-between; align-items: center; padding: 5px 12px; background: #101624; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); }
+
+/* Modal */
+.modal-backdrop { position: fixed; inset: 0; background: rgba(5,8,14,.72); display: grid; place-items: center; z-index: 50; padding: 16px; }
+.modal-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); width: min(560px, 100%); padding: 18px; box-shadow: 0 20px 50px rgba(0,0,0,.5); }
+
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--text); }
+
+@media (max-width: 1100px) { .studio-shell { grid-template-columns: 1fr; } .studio-list { max-height: 260px; } .param-row { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 1000px) { .layout { grid-template-columns: 1fr; } .sidebar { flex-direction: row; flex-wrap: wrap; } .split-2 { grid-template-columns: 1fr; } }

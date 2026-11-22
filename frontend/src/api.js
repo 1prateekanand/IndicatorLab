@@ -37,9 +37,10 @@ export function fmtTime(iso) {
 }
 export function specText(spec) {
   if (!spec) return '';
-  const parts = spec.indicators.map((i) => {
+  const parts = (spec.indicators || []).map((i) => {
     const ps = Object.entries(i.params || {}).map(([k, v]) => `${k}=${v}`).join(', ');
     return `${i.name}(${ps})`;
   });
-  return `${parts.join(' + ')} | votes>=${spec.min_votes} | ${spec.direction} | SL ${spec.stop_loss_pct}% TP ${spec.target_pct}%`;
+  const indPart = parts.length ? parts.join(' + ') : (spec.strategy_name || 'custom_strategy');
+  return `${indPart} | votes>=${spec.min_votes ?? 1} | ${spec.direction || 'both'} | SL ${spec.stop_loss_pct ?? 0}% TP ${spec.target_pct ?? 0}%`;
 }
