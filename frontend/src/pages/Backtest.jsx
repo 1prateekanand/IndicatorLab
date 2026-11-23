@@ -4,24 +4,34 @@ import { useApp, loadStrategy, saveStrategy } from '../context.js';
 import { Card, Stat, Field, ErrorBox, Table, useAsync } from '../components/ui.jsx';
 import Plot from '../components/Plot.jsx';
 
-const DEFAULT_STRATEGY = { indicators: [], min_votes: 1, direction: 'both', stop_loss_pct: 0.5, target_pct: 1.0 };
+const DEFAULT_STRATEGY = { indicators: [], min_votes: 1, direction: 'both', stop_loss_pct: 0.5, target_pct: 1.0, timeframe: '1m' };
+const TIMEFRAMES = ['1m', '5m', '10m', '1H', '4H'];
 
 export default function Backtest() {
-  const { datasetId } = useApp();
+  const { datasets, datasetId } = useApp();
   const [strategy, setStrategy] = useState(() => loadStrategy() || DEFAULT_STRATEGY);
   const [studioStrategies, setStudioStrategies] = useState([]);
   const [regIndicators, setRegIndicators] = useState([]);
   const [split, setSplit] = useState('validation');
+  const [timeframe, setTimeframe] = useState(() => loadStrategy()?.timeframe || '1m');
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
   const [costs, setCosts] = useState({ initial_capital: '', position_pct: '', brokerage_per_order: '', charges_pct: '', slippage_points: '' });
-  const [chart, setChart] = useState('5min');
   const [result, setResult] = useState(null);
   const [oos, setOos] = useState(null);
   const [confirmOos, setConfirmOos] = useState(false);
   const { error, busy, run } = useAsync();
 
+  const activeDs = datasets.find((d) => d.id === Number(datasetId)) || null;
+  const minBoundDate = activeDs?.start_ts ? activeDs.start_ts.slice(0, 10) : '';
+  const maxBoundDate = activeDs?.end_ts ? activeDs.end_ts.slice(0, 10) : '';
+
   useEffect(() => {
     const s = loadStrategy();
-    if (s) setStrategy(s);
+    if (s) {
+      setStrategy(s);
+      if (s.timeframe) setTimeframe(s.timeframe);
+    }
     get('/api/studio/strategies').then((r) => setStudioStrategies((r.items || []).filter((x) => x.registered))).catch(() => {});
     get('/api/indicators').then((r) => setRegIndicators((r.indicators || []).filter((x) => x.available))).catch(() => {});
   }, []);
@@ -34,6 +44,7 @@ export default function Backtest() {
       strategy_name: found.name,
       strategy_ids: [found.id],
       strategy_params: { [found.id]: Object.fromEntries((found.params || []).map((p) => [p.name, p.default])) },
+      timeframe,
       indicators: (found.linked_indicators || []).map((name) => ({ name, params: {} })),
       min_votes: 1,
       direction: found.direction || 'both',
@@ -47,7 +58,7 @@ export default function Backtest() {
   const addIndicatorCombo = (name) => {
     if (!name || strategy.indicators.some((i) => i.name === name)) return;
     const def = regIndicators.find((i) => i.name === name);
-    const next = { ...strategy, indicators: [...strategy.indicators, { name, params: { ...(def?.defaults || {}) } }] };
+    const next = { ...strategy, timeframe, indicators: [...strategy.indicators, { name, params: { ...(def?.defaults || {}) } }] };
     setStrategy(next);
     saveStrategy(next);
   };
@@ -55,7 +66,14 @@ export default function Backtest() {
   const hasRunnableTarget = Boolean(strategy.indicators?.length || strategy.strategy_ids?.length);
 
   const body = () => {
-    const payload = { dataset_id: datasetId, strategy, split, chart_timeframe: chart };
+    const payload = {
+      dataset_id: datasetId,
+      strategy: { ...strategy, timeframe },
+      split,
+      timeframe,
+      start_date: startDate || null,
+      end_date: endDate || null,
+    };
     for (const [k, v] of Object.entries(costs)) if (v !== '') payload[k] = Number(v);
     return payload;
   };
@@ -95,7 +113,7 @@ export default function Backtest() {
 
   return (
     <>
-      <div className="page-head"><div><h1>Backtest</h1><div className="muted">Simulates registered custom strategies and indicator combinations bar-by-bar with explicit execution rules.</div></div></div>
+      <div className="page-head"><div><h1>Backtest</h1><div className="muted">Simulates registered custom strategies and indicator combinations bar-by-bar across NSE session-anchored timeframes without look-ahead.</div></div></div>
       <ErrorBox error={error} />
       <Card title="Setup" actions={<button className="primary" disabled={busy || !datasetId || !hasRunnableTarget} onClick={runBacktest}>Run backtest</button>}>
         <div className="form-grid" style={{ marginBottom: 12 }}>
@@ -111,16 +129,22 @@ export default function Backtest() {
               {regIndicators.map((i) => <option key={i.name} value={i.name}>{i.name}</option>)}
             </select>
           </Field>
+          <Field label="Timeframe">
+            <select value={timeframe} onChange={(e) => setTimeframe(e.target.value)}>
+              {TIMEFRAMES.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </Field>
           <Field label="Split">
             <select value={split} onChange={(e) => setSplit(e.target.value)}>
               <option value="train">Train</option>
               <option value="validation">Validation</option>
             </select>
           </Field>
-          <Field label="Chart timeframe">
-            <select value={chart} onChange={(e) => setChart(e.target.value)}>
-              {['1min', '5min', '15min', '30min', '60min'].map((t) => <option key={t} value={t}>{t}</option>)}
-            </select>
+          <Field label="Start Date (optional)" hint={minBoundDate ? `min ${minBoundDate}` : ''}>
+            <input type="date" min={minBoundDate} max={maxBoundDate} value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+          </Field>
+          <Field label="End Date (optional)" hint={maxBoundDate ? `max ${maxBoundDate}` : ''}>
+            <input type="date" min={minBoundDate} max={maxBoundDate} value={endDate} onChange={(e) => setEndDate(e.target.value)} />
           </Field>
           <Field label="Initial capital"><input type="number" placeholder="default" value={costs.initial_capital} onChange={setCost('initial_capital')} /></Field>
           <Field label="Position size (fraction)"><input type="number" step="0.01" placeholder="default" value={costs.position_pct} onChange={setCost('position_pct')} /></Field>
@@ -129,7 +153,7 @@ export default function Backtest() {
           <Field label="Slippage (points)"><input type="number" step="0.1" placeholder="default" value={costs.slippage_points} onChange={setCost('slippage_points')} /></Field>
         </div>
         <div className="info-box">
-          Active Target: {hasRunnableTarget
+          Active Target ({timeframe}): {hasRunnableTarget
             ? `${strategy.strategy_name ? `[${strategy.strategy_name}] ` : ''}${specText(strategy)}`
             : 'none selected. Register an indicator/strategy in the Studios or select one above.'}
         </div>
@@ -139,14 +163,14 @@ export default function Backtest() {
           <div className="grid stats">
             <Stat label="Final balance" value={fmtMoney(m.final_capital)} tone={m.net_profit >= 0 ? 'good' : 'bad'} />
             <Stat label="Net profit" value={fmtMoney(m.net_profit)} tone={m.net_profit >= 0 ? 'good' : 'bad'} hint={fmtPct(m.return_pct)} />
-            <Stat label="Sharpe ratio" value={fmtNum(m.sharpe_ratio ?? 0)} />
+            <Stat label="Gross profit / loss" value={`${fmtMoney(m.gross_profit ?? 0)} / ${fmtMoney(m.gross_loss ?? 0)}`} hint={`${m.winning_trades ?? 0}W · ${m.losing_trades ?? 0}L`} />
             <Stat label="Win rate" value={fmtPct(m.win_rate)} hint={`${m.trades} trades`} />
             <Stat label="Profit factor" value={fmtNum(m.profit_factor)} />
+            <Stat label="Sharpe / Sortino" value={`${fmtNum(m.sharpe_ratio ?? 0)} / ${fmtNum(m.sortino_ratio ?? 0)}`} hint={`Expectancy ${fmtMoney(m.expectancy ?? 0)}`} />
             <Stat label="Max drawdown" value={fmtMoney(m.max_drawdown)} hint={fmtPct(m.max_drawdown_pct)} tone="bad" />
-            <Stat label="Costs paid" value={fmtMoney(m.total_costs)} />
-            <Stat label="Skipped entries" value={m.skipped_entries} />
+            <Stat label="Avg Hold Time" value={`${fmtNum(m.avg_holding_minutes ?? 0)}m`} hint={`${fmtNum(m.avg_holding_bars ?? 0)} bars · Costs ${fmtMoney(m.total_costs)}`} />
           </div>
-          <Card title={`Price, entries and exits (${result.split})`}>
+          <Card title={`Price, entries and exits (${result.split} · ${result.timeframe || timeframe})`}>
             {candleData ? <Plot data={candleData} layout={{ xaxis: { rangeslider: { visible: false } } }} height={420} /> : <div className="empty">No candles in this split.</div>}
           </Card>
           <Card title="Equity and drawdown">
@@ -175,7 +199,7 @@ export default function Backtest() {
       )}
       <Card title="Out-of-sample test">
         <p className="muted" style={{ marginTop: 0 }}>
-          The out-of-sample tail is never used by the agents. Running it is a one-time action per strategy and dataset, and the
+          The out-of-sample tail is never used by the agents. Running it is a one-time action per strategy, timeframe, and dataset, and the
           result is stored permanently.
         </p>
         {!confirmOos
@@ -187,7 +211,7 @@ export default function Backtest() {
             </div>}
         {oos && <div className="info-box">
           {oos.already_run ? `Already run on ${new Date(oos.created_at).toLocaleString()}. ` : 'Run now. '}
-          Net profit {fmtMoney(oos.metrics.net_profit)} · Sharpe {fmtNum(oos.metrics.sharpe_ratio ?? 0)} · {oos.metrics.trades} trades · win rate {fmtPct(oos.metrics.win_rate)} · max drawdown {fmtPct(oos.metrics.max_drawdown_pct)}
+          Net profit {fmtMoney(oos.metrics.net_profit)} · Sharpe {fmtNum(oos.metrics.sharpe_ratio ?? 0)} · Sortino {fmtNum(oos.metrics.sortino_ratio ?? 0)} · {oos.metrics.trades} trades · win rate {fmtPct(oos.metrics.win_rate)} · max drawdown {fmtPct(oos.metrics.max_drawdown_pct)}
         </div>}
       </Card>
     </>

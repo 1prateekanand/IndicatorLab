@@ -47,8 +47,10 @@ export default function Analytics() {
 
   useEffect(() => {
     if (!datasetId || !strategyHash) return;
-    run(async () => setEquity(await get(`/api/analytics/equity?dataset_id=${datasetId}&strategy_hash=${strategyHash}&split=${split}`)));
-  }, [datasetId, strategyHash, split]);
+    const selected = (rankings || []).find((r) => r.strategy_hash === strategyHash);
+    const tfParam = selected?.timeframe ? `&timeframe=${encodeURIComponent(selected.timeframe)}` : '';
+    run(async () => setEquity(await get(`/api/analytics/equity?dataset_id=${datasetId}&strategy_hash=${strategyHash}&split=${split}${tfParam}`)));
+  }, [datasetId, strategyHash, split, rankings]);
 
   const scatter = tvv.length ? [{
     type: 'scatter', mode: 'markers', x: tvv.map((r) => r.train_net_profit), y: tvv.map((r) => r.validation_net_profit),
@@ -83,7 +85,7 @@ export default function Analytics() {
         <Card title="Equity and drawdown" actions={
           <>
             <select value={strategyHash} onChange={(e) => setStrategyHash(e.target.value)}>
-              {(rankings || []).map((r) => <option key={r.strategy_hash} value={r.strategy_hash}>#{r.rank} {r.strategy_hash}</option>)}
+              {(rankings || []).map((r) => <option key={`${r.strategy_hash}-${r.timeframe || '1m'}`} value={r.strategy_hash}>#{r.rank} {r.timeframe || '1m'} · {r.strategy_hash}</option>)}
             </select>
             <select value={split} onChange={(e) => setSplit(e.target.value)}>
               <option value="train">Train</option><option value="validation">Validation</option>

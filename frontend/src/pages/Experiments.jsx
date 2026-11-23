@@ -56,6 +56,7 @@ export default function Experiments() {
             { key: 'id', label: 'ID', align: 'right' },
             { key: 'trial_number', label: 'Trial', align: 'right', render: (r) => r.trial_number ?? '—' },
             { key: 'study_name', label: 'Study', render: (r) => r.study_name || '—' },
+            { key: 'timeframe', label: 'TF', render: (r) => <Badge status={r.timeframe || r.spec?.timeframe || '1m'} /> },
             { key: 'description', label: 'Combination & parameters', render: (r) => <span className="mono">{r.description}</span> },
             { key: 'status', label: 'Status', render: (r) => <Badge status={r.status} /> },
             { key: 'net', label: 'Net profit', align: 'right', render: (r) => r.metrics ? fmtMoney(r.metrics.net_profit) : '—' },

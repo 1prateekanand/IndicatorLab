@@ -1,0 +1,133 @@
+{
+  "nextIds": {
+    "dataset": 1,
+    "indicator": 4,
+    "strategy": 1,
+    "experiment": 1,
+    "validation": 1,
+    "log": 1,
+    "stat": 1
+  },
+  "datasets": [],
+  "studioIndicators": [
+    {
+      "id": 1,
+      "name": "rsi_macd",
+      "version": "1.0.0",
+      "category": "Custom",
+      "description": "",
+      "code": "\ndef compute(df, **params):\n    period = int(params.get(\"period\", 14))\n\n    close = df[\"close\"].astype(float)\n    delta = close.diff()\n\n    gain = delta.clip(lower=0)\n    loss = -delta.clip(upper=0)\n\n    avg_gain = gain.ewm(\n        alpha=1 / period,\n        min_periods=period,\n        adjust=False\n    ).mean()\n\n    avg_loss = loss.ewm(\n        alpha=1 / period,\n        min_periods=period,\n        adjust=False\n    ).mean()\n\n    rs = avg_gain / avg_loss\n\n    rsi = 100 - (100 / (1 + rs))\n\n    rsi = rsi.mask(\n        (avg_loss == 0) & (avg_gain > 0), 100\n    )\n    rsi = rsi.mask(\n        (avg_loss == 0) & (avg_gain == 0), 50\n    )\n\n    return rsi.fillna(0).tolist()\n",
+      "params": [],
+      "status": "error",
+      "registered": false,
+      "available": false,
+      "status_reason": "TypeError (line 11): Series.ewm() got an unexpected keyword argument 'min_periods'",
+      "last_validated_at": "2026-11-23T08:39:57Z",
+      "last_validation": {
+        "ok": false,
+        "stage": "runtime",
+        "error": {
+          "type": "TypeError",
+          "line": 11,
+          "message": "Series.ewm() got an unexpected keyword argument 'min_periods'"
+        },
+        "data_source": "dataset #1 (1m, train split)"
+      },
+      "created_at": "2026-11-23T08:39:55Z",
+      "updated_at": "2026-11-23T08:39:57Z"
+    },
+    {
+      "id": 2,
+      "name": "indicator1",
+      "version": "1.0.0",
+      "category": "Custom",
+      "description": "",
+      "code": "\ndef compute(df, **params):\n    period = int(params.get(\"period\", 14))\n\n    close = df[\"close\"].astype(float)\n    delta = close.diff()\n\n    gain = delta.clip(lower=0)\n    loss = -delta.clip(upper=0)\n\n    avg_gain = gain.ewm(\n        alpha=1 / period,\n        adjust=False\n    ).mean()\n\n    avg_loss = loss.ewm(\n        alpha=1 / period,\n        adjust=False\n    ).mean()\n\n    rs = avg_gain / avg_loss\n    rsi = 100 - (100 / (1 + rs))\n\n    rsi = rsi.mask(\n        (avg_loss == 0) & (avg_gain > 0), 100\n    )\n\n    rsi = rsi.mask(\n        (avg_loss == 0) & (avg_gain == 0), 50\n    )\n\n    return rsi.fillna(0).tolist()\n",
+      "params": [],
+      "status": "error",
+      "registered": false,
+      "available": false,
+      "status_reason": "AttributeError (line 24): 'Series' object has no attribute 'mask'",
+      "last_validated_at": "2026-11-23T08:53:43Z",
+      "last_validation": {
+        "ok": false,
+        "stage": "runtime",
+        "error": {
+          "type": "AttributeError",
+          "line": 24,
+          "message": "'Series' object has no attribute 'mask'"
+        },
+        "data_source": "dataset #1 (1m, train split)"
+      },
+      "created_at": "2026-11-23T08:53:41Z",
+      "updated_at": "2026-11-23T08:53:43Z"
+    },
+    {
+      "id": 3,
+      "name": "indicator2",
+      "version": "1.0.0",
+      "category": "Custom",
+      "description": "",
+      "code": "\ndef compute(df, **params):\n    period = int(params.get(\"period\", 14))\n    close = df[\"close\"].tolist()\n\n    result = [0.0] * len(close)\n\n    if len(close) <= period:\n        return result\n\n    gains = []\n    losses = []\n\n    for i in range(1, len(close)):\n        change = float(close[i]) - float(close[i - 1])\n        gains.append(max(change, 0.0))\n        losses.append(max(-change, 0.0))\n\n    avg_gain = sum(gains[:period]) / period\n    avg_loss = sum(losses[:period]) / period\n\n    def calculate_rsi(gain, loss):\n        if loss == 0:\n            return 100.0 if gain > 0 else 50.0\n        rs = gain / loss\n        return 100.0 - (100.0 / (1.0 + rs))\n\n    result[period] = calculate_rsi(avg_gain, avg_loss)\n\n    for i in range(period + 1, len(close)):\n        idx = i - 1\n\n        avg_gain = (\n            avg_gain * (period - 1) + gains[idx]\n        ) / period\n\n        avg_loss = (\n            avg_loss * (period - 1) + losses[idx]\n        ) / period\n\n        result[i] = calculate_rsi(avg_gain, avg_loss)\n\n    return result\n",
+      "params": [],
+      "status": "error",
+      "registered": false,
+      "available": false,
+      "status_reason": "ValueError (line 1): Signal at bar 14 is 67.0299727520427; values must be in {-1, 0, 1}",
+      "last_validated_at": "2026-11-23T08:55:13Z",
+      "last_validation": {
+        "ok": false,
+        "stage": "runtime",
+        "error": {
+          "type": "ValueError",
+          "line": 1,
+          "message": "Signal at bar 14 is 67.0299727520427; values must be in {-1, 0, 1}"
+        },
+        "data_source": "dataset #1 (1m, train split)"
+      },
+      "created_at": "2026-11-23T08:55:11Z",
+      "updated_at": "2026-11-23T08:55:13Z"
+    }
+  ],
+  "studioStrategies": [],
+  "experiments": [],
+  "validations": [],
+  "oosTests": [],
+  "statisticalTests": [],
+  "optimizationRuns": [],
+  "agentLogs": [],
+  "agentCheckpoints": {},
+  "agents": {
+    "research_agent": {
+      "name": "research_agent",
+      "status": "stopped",
+      "current_task": "",
+      "current_timeframe": null,
+      "current_combination": null,
+      "algorithm": "",
+      "trials_processed": 0,
+      "error_count": 0,
+      "progress": 0,
+      "started_at": null,
+      "last_heartbeat": null,
+      "duplicates_prevented": 0,
+      "detail": {}
+    },
+    "evaluation_agent": {
+      "name": "evaluation_agent",
+      "status": "stopped",
+      "current_task": "",
+      "current_timeframe": null,
+      "current_combination": null,
+      "algorithm": "",
+      "trials_processed": 0,
+      "error_count": 0,
+      "progress": 0,
+      "started_at": null,
+      "last_heartbeat": null,
+      "duplicates_prevented": 0,
+      "detail": {}
+    }
+  },
+  "savedAgentSettings": null
+}

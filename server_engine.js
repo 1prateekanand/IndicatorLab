@@ -4,6 +4,43 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  SUPPORTED_TIMEFRAMES,
+  TIMEFRAME_MINUTES,
+  discoverHistoricalCsvFiles,
+  ensureCanonicalHistoricalDataset,
+  ensureTimeframeCandles,
+  getDatasetQualityReport,
+  getHistoricalSyncState,
+  getMarketDataset,
+  ingestCandlesArray,
+  ingestHistoricalDataset,
+  ingestUploadedCsvStreams,
+  listMarketDatasets,
+  loadCanonicalCandlesForEngine,
+  normalizeTimeframe,
+  queryMarketCandles,
+  HISTORICAL_DIR,
+} from './market_data_db.js';
+
+export {
+  SUPPORTED_TIMEFRAMES,
+  TIMEFRAME_MINUTES,
+  discoverHistoricalCsvFiles,
+  ensureCanonicalHistoricalDataset,
+  ensureTimeframeCandles,
+  getDatasetQualityReport,
+  getHistoricalSyncState,
+  getMarketDataset,
+  ingestCandlesArray,
+  ingestHistoricalDataset,
+  ingestUploadedCsvStreams,
+  listMarketDatasets,
+  loadCanonicalCandlesForEngine,
+  normalizeTimeframe,
+  queryMarketCandles,
+  HISTORICAL_DIR,
+};
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const DATA_DIR = path.resolve(process.env.IL_DATA_DIR || path.join(__dirname, 'data'));
@@ -58,6 +95,8 @@ function initialState() {
         name: 'research_agent',
         status: 'stopped',
         current_task: '',
+        current_timeframe: null,
+        current_combination: null,
         algorithm: '',
         trials_processed: 0,
         error_count: 0,
@@ -71,6 +110,8 @@ function initialState() {
         name: 'evaluation_agent',
         status: 'stopped',
         current_task: '',
+        current_timeframe: null,
+        current_combination: null,
         algorithm: '',
         trials_processed: 0,
         error_count: 0,
@@ -89,20 +130,81 @@ class Store {
   constructor() {
     ensureDirs();
     this.state = this._load();
-    this._candleCache = new Map();
     this._signalCache = new Map();
+    this._migrateLegacyJsonDatasets();
   }
 
   _load() {
     try {
       if (fs.existsSync(STATE_FILE)) {
         const parsed = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-        return { ...initialState(), ...parsed };
+        const merged = { ...initialState(), ...parsed };
+        this._reconcileLoadedState(merged);
+        return merged;
       }
     } catch (err) {
       console.warn('[IndicatorLab] Failed to load state, starting fresh:', err.message);
     }
     return initialState();
+  }
+
+  _reconcileLoadedState(st) {
+    if (!Array.isArray(st.studioIndicators)) st.studioIndicators = [];
+    if (!Array.isArray(st.studioStrategies)) st.studioStrategies = [];
+    // Deduplicate by id or normalized name while preserving existing user order
+    const seenIds = new Set();
+    const seenNames = new Set();
+    const cleanInds = [];
+    for (const ind of st.studioIndicators) {
+      if (!ind || typeof ind !== 'object') continue;
+      const normName = String(ind.name || '').trim().toLowerCase();
+      if ((ind.id != null && seenIds.has(ind.id)) || (normName && seenNames.has(normName))) continue;
+      if (ind.id != null) seenIds.add(ind.id);
+      if (normName) seenNames.add(normName);
+      cleanInds.push(ind);
+    }
+    st.studioIndicators = cleanInds;
+    const maxIndId = cleanInds.reduce((m, i) => Math.max(m, Number(i.id) || 0), 0);
+    const maxStratId = st.studioStrategies.reduce((m, s) => Math.max(m, Number(s.id) || 0), 0);
+    st.nextIds = {
+      ...initialState().nextIds,
+      ...(st.nextIds || {}),
+      indicator: Math.max(Number(st.nextIds?.indicator || 1), maxIndId + 1),
+      strategy: Math.max(Number(st.nextIds?.strategy || 1), maxStratId + 1),
+    };
+  }
+
+  reloadFromDisk() {
+    this.state = this._load();
+    this._signalCache.clear();
+    return this.state;
+  }
+
+  _migrateLegacyJsonDatasets() {
+    const legacy = this.state.datasets || [];
+    if (!legacy.length) return;
+    const existingNames = new Set(listMarketDatasets(true).map((d) => d.name));
+    for (const d of legacy) {
+      if (existingNames.has(d.name)) continue;
+      const file = path.join(DATASETS_DIR, `${d.id}.json`);
+      if (!fs.existsSync(file)) continue;
+      try {
+        const rows = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (Array.isArray(rows) && rows.length) {
+          ingestCandlesArray({
+            name: d.name,
+            instrument: d.symbol === 'SYNTHETIC' ? 'Synthetic Test Index' : d.symbol,
+            symbol: d.symbol || 'UNKNOWN',
+            timeframe: normalizeTimeframe(d.timeframe) || '1m',
+            sourceDir: d.source_file || 'legacy_json',
+            candles: rows,
+            replace: true,
+          });
+        }
+      } catch {
+        // skip unreadable legacy file
+      }
+    }
   }
 
   save() {
@@ -112,33 +214,24 @@ class Store {
     fs.renameSync(tmp, STATE_FILE);
   }
 
-  clearSignalCache(indicatorName = null) {
-    if (!indicatorName) {
+  clearSignalCache(indicatorNameOrId = null) {
+    if (indicatorNameOrId === null || indicatorNameOrId === undefined || indicatorNameOrId === '') {
       this._signalCache.clear();
       return;
     }
+    const needle = String(indicatorNameOrId);
     for (const key of this._signalCache.keys()) {
-      if (key.includes(`::${indicatorName}::`)) {
+      if (key.includes(`::${needle}::`)) {
         this._signalCache.delete(key);
       }
     }
   }
 
-  loadCandles(datasetId) {
-    const id = Number(datasetId);
-    if (this._candleCache.has(id)) return this._candleCache.get(id);
-    const file = path.join(DATASETS_DIR, `${id}.json`);
-    if (!fs.existsSync(file)) throw new Error(`dataset ${id} has no candles`);
-    const rows = JSON.parse(fs.readFileSync(file, 'utf8'));
-    this._candleCache.set(id, rows);
-    return rows;
+  loadCandles(datasetId, opts = {}) {
+    return loadCanonicalCandlesForEngine(datasetId, opts).candles;
   }
 
-  saveCandles(datasetId, candles) {
-    const id = Number(datasetId);
-    ensureDirs();
-    fs.writeFileSync(path.join(DATASETS_DIR, `${id}.json`), JSON.stringify(candles));
-    this._candleCache.set(id, candles);
+  saveCandles(_datasetId, _candles) {
     this.clearSignalCache();
   }
 }
@@ -292,49 +385,60 @@ export function parseCsvCandles(csvText) {
   return candles;
 }
 
-export function upsertDataset({ name, symbol, timeframe = '1min', source_file = 'upload', candles, replace = true }) {
-  const existing = store.state.datasets.find((d) => d.name === name);
-  if (existing && !replace) {
-    throw new Error(`dataset '${name}' already exists; pass replace=true to overwrite`);
-  }
-  if (existing) {
-    store.state.datasets = store.state.datasets.filter((d) => d.id !== existing.id);
-  }
-  const id = store.state.nextIds.dataset++;
-  const row = {
-    id,
+export function upsertDataset({ name, instrument, symbol, timeframe = '1m', source_file = 'upload', candles, replace = true }) {
+  const row = ingestCandlesArray({
     name,
+    instrument: instrument || (symbol === 'SYNTHETIC' ? 'Synthetic Test Index' : `${symbol} Index`),
     symbol,
-    timeframe,
-    source_file,
-    rows: candles.length,
-    start_ts: candles[0].time,
-    end_ts: candles[candles.length - 1].time,
-    imported_at: utcnow(),
-  };
-  store.state.datasets.push(row);
-  store.saveCandles(id, candles);
-  store.save();
+    timeframe: normalizeTimeframe(timeframe) || '1m',
+    sourceDir: source_file,
+    candles,
+    replace,
+  });
+  store.clearSignalCache();
   return row;
 }
 
-export function resampleCandles(candles, timeframe = '5min') {
-  if (timeframe === '1min' || candles.length === 0) return candles;
-  const mins = Number(String(timeframe).replace(/[^0-9]/g, '')) || 5;
-  const bucketMs = mins * 60 * 1000;
+export function resampleCandles(candles, timeframe = '5m') {
+  const tf = normalizeTimeframe(timeframe) || '5m';
+  if (tf === '1m' || candles.length === 0) return candles;
+  const mins = TIMEFRAME_MINUTES[tf] || 5;
+  const sessionOpen = 9 * 60 + 15;
+  const sessionClose = 15 * 60 + 30;
   const buckets = new Map();
   for (const c of candles) {
-    const t = Date.parse(c.time);
-    const b = Math.floor(t / bucketMs) * bucketMs;
-    const key = new Date(b).toISOString().slice(0, 19);
+    const ts = c.time || c.ts;
+    const dateStr = ts.slice(0, 10);
+    const hh = Number(ts.slice(11, 13));
+    const mm = Number(ts.slice(14, 16));
+    const mod = hh * 60 + mm;
+    if (mod < sessionOpen || mod > sessionClose) continue;
+    const offset = mod === sessionClose ? (sessionClose - sessionOpen - 1) : (mod - sessionOpen);
+    const bIdx = Math.floor(offset / mins);
+    const startMin = sessionOpen + bIdx * mins;
+    const bHh = String(Math.floor(startMin / 60)).padStart(2, '0');
+    const bMm = String(startMin % 60).padStart(2, '0');
+    const key = `${dateStr}T${bHh}:${bMm}:00+05:30`;
     const cur = buckets.get(key);
+    const vol = c.volume !== undefined && c.volume !== null ? Number(c.volume) : null;
     if (!cur) {
-      buckets.set(key, { time: key, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume || 0 });
+      buckets.set(key, {
+        time: key,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        volume: vol,
+        volume_available: vol !== null,
+      });
     } else {
       cur.high = Math.max(cur.high, c.high);
       cur.low = Math.min(cur.low, c.low);
       cur.close = c.close;
-      cur.volume += c.volume || 0;
+      if (vol !== null) {
+        cur.volume = (cur.volume || 0) + vol;
+        cur.volume_available = true;
+      }
     }
   }
   return [...buckets.values()];
@@ -345,45 +449,171 @@ export function probeCandles(n = 400) {
 }
 
 // ---------------------------------------------------------------------------
-// Isolated Python 3.11 Sandbox Execution
+// Isolated Python 3.11 Sandbox Execution (Bounded Concurrency + Kill Escalation)
 // ---------------------------------------------------------------------------
-export function runPythonSandbox(payload, { cpuLimitS = 5, memLimitMb = 256, timeoutMs = 10000 } = {}) {
-  return new Promise((resolve) => {
-    const child = spawn('python3', ['-I', SANDBOX_SCRIPT], {
-      cwd: __dirname,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: timeoutMs,
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (d) => { stdout += d.toString(); });
-    child.stderr.on('data', (d) => { stderr += d.toString(); });
-    child.on('error', (err) => {
-      resolve({ ok: false, stage: 'sandbox', error: { type: 'SandboxError', line: 1, message: err.message } });
-    });
-    child.on('close', (code) => {
-      if (stdout.trim()) {
-        try {
-          resolve(JSON.parse(stdout));
-          return;
-        } catch {
-          // fall through
-        }
-      }
-      resolve({
-        ok: false,
-        stage: 'sandbox',
-        error: {
-          type: 'SandboxError',
-          line: 1,
-          message: stderr.trim() || `Python sandbox exited with code ${code}`,
-        },
+const SANDBOX_MAX_CONCURRENT = Math.max(2, Math.min(4, os.cpus()?.length || 2));
+const SANDBOX_MAX_STDOUT_BYTES = 32 * 1024 * 1024;
+const SANDBOX_MAX_STDERR_BYTES = 256 * 1024;
+let _sandboxRunning = 0;
+const _sandboxQueue = [];
+
+function _acquireSandboxSlot() {
+  if (_sandboxRunning < SANDBOX_MAX_CONCURRENT) {
+    _sandboxRunning += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => _sandboxQueue.push(resolve));
+}
+
+function _releaseSandboxSlot() {
+  _sandboxRunning = Math.max(0, _sandboxRunning - 1);
+  if (_sandboxQueue.length > 0 && _sandboxRunning < SANDBOX_MAX_CONCURRENT) {
+    _sandboxRunning += 1;
+    const next = _sandboxQueue.shift();
+    next();
+  }
+}
+
+export function toColumnarCols(candles = []) {
+  const n = candles.length;
+  const time = new Array(n);
+  const open = new Array(n);
+  const high = new Array(n);
+  const low = new Array(n);
+  const close = new Array(n);
+  const volume = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const c = candles[i];
+    time[i] = c.time ?? c.ts ?? i;
+    open[i] = c.open;
+    high[i] = c.high;
+    low[i] = c.low;
+    close[i] = c.close;
+    volume[i] = c.volume ?? null;
+  }
+  return { time, open, high, low, close, volume };
+}
+
+export async function runPythonSandbox(payload, { cpuLimitS = 5, memLimitMb = 256, timeoutMs = 10000 } = {}) {
+  await _acquireSandboxSlot();
+  try {
+    return await new Promise((resolve) => {
+      const child = spawn('python3', ['-I', SANDBOX_SCRIPT], {
+        cwd: __dirname,
+        stdio: ['pipe', 'pipe', 'pipe'],
       });
+      let stdout = '';
+      let stderr = '';
+      let stdoutOverflow = false;
+      let timedOut = false;
+      let settled = false;
+      let killTimer = null;
+
+      const finish = (res) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(wallTimer);
+        if (killTimer) clearTimeout(killTimer);
+        resolve(res);
+      };
+
+      const wallTimer = setTimeout(() => {
+        timedOut = true;
+        try { child.kill('SIGTERM'); } catch { /* ignore */ }
+        killTimer = setTimeout(() => {
+          try { child.kill('SIGKILL'); } catch { /* ignore */ }
+        }, 400);
+      }, timeoutMs);
+
+      child.stdout.on('data', (chunk) => {
+        if (stdoutOverflow) return;
+        const text = chunk.toString();
+        if (stdout.length + text.length > SANDBOX_MAX_STDOUT_BYTES) {
+          stdoutOverflow = true;
+          try { child.kill('SIGKILL'); } catch { /* ignore */ }
+          finish({
+            ok: false,
+            stage: 'sandbox',
+            error: { type: 'OutputLimitError', line: 1, message: 'Sandbox output exceeded 32 MB limit.' },
+          });
+          return;
+        }
+        stdout += text;
+      });
+
+      child.stderr.on('data', (chunk) => {
+        if (stderr.length < SANDBOX_MAX_STDERR_BYTES) {
+          stderr += chunk.toString().slice(0, SANDBOX_MAX_STDERR_BYTES - stderr.length);
+        }
+      });
+
+      child.on('error', (err) => {
+        finish({ ok: false, stage: 'sandbox', error: { type: 'SandboxError', line: 1, message: err.message } });
+      });
+
+      child.stdin.on('error', () => { /* ignore EPIPE if child closed early */ });
+
+      child.on('close', (code, signal) => {
+        if (settled) return;
+        if (timedOut) {
+          finish({
+            ok: false,
+            stage: 'timeout',
+            error: {
+              type: 'TimeoutError',
+              line: 1,
+              message: `Sandbox execution exceeded wall-clock timeout (${timeoutMs} ms). Check for infinite loops or expensive nested loops.`,
+            },
+          });
+          return;
+        }
+        if (stdout.trim()) {
+          try {
+            finish(JSON.parse(stdout));
+            return;
+          } catch {
+            // fall through to diagnostic error
+          }
+        }
+        if (signal === 'SIGXCPU') {
+          finish({
+            ok: false,
+            stage: 'timeout',
+            error: { type: 'TimeoutError', line: 1, message: `Sandbox CPU limit (${cpuLimitS}s) exceeded.` },
+          });
+          return;
+        }
+        if (signal === 'SIGKILL' || stderr.includes('MemoryError')) {
+          finish({
+            ok: false,
+            stage: 'memory',
+            error: { type: 'MemoryError', line: 1, message: `Sandbox memory limit (${memLimitMb} MB) exceeded.` },
+          });
+          return;
+        }
+        finish({
+          ok: false,
+          stage: 'sandbox',
+          error: {
+            type: 'SandboxError',
+            line: 1,
+            message: stderr.trim() || `Python sandbox exited abnormally (code=${code}, signal=${signal || 'none'})`,
+          },
+        });
+      });
+
+      // Prefer compact columnar transport when candles array is passed
+      const reqPayload = { ...payload, cpu_limit_s: cpuLimitS, mem_limit_mb: memLimitMb };
+      if (Array.isArray(reqPayload.candles) && !reqPayload.cols) {
+        reqPayload.cols = toColumnarCols(reqPayload.candles);
+        delete reqPayload.candles;
+      }
+      child.stdin.write(JSON.stringify(reqPayload));
+      child.stdin.end();
     });
-    const req = { ...payload, cpu_limit_s: cpuLimitS, mem_limit_mb: memLimitMb };
-    child.stdin.write(JSON.stringify(req));
-    child.stdin.end();
-  });
+  } finally {
+    _releaseSandboxSlot();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -442,18 +672,74 @@ export function cleanIndicatorParams(ind, raw = {}) {
   return merged;
 }
 
+export function resolveRegisteredIndicator(ind) {
+  if (!ind || !ind.registered || !ind.available) return null;
+  if (ind.working_snapshot && typeof ind.working_snapshot === 'object') {
+    return {
+      ...ind,
+      ...ind.working_snapshot,
+      id: ind.id,
+      name: ind.name,
+      registered: true,
+      available: true,
+    };
+  }
+  return ind;
+}
+
 export function getRegisteredIndicators() {
-  return store.state.studioIndicators.filter((i) => i.registered && i.available);
+  return store.state.studioIndicators.map(resolveRegisteredIndicator).filter(Boolean);
+}
+
+export function resolveRegisteredStrategy(strat) {
+  if (!strat || !strat.registered || !strat.available) return null;
+  if (strat.working_snapshot && typeof strat.working_snapshot === 'object') {
+    return {
+      ...strat,
+      ...strat.working_snapshot,
+      id: strat.id,
+      name: strat.name,
+      registered: true,
+      available: true,
+    };
+  }
+  return strat;
 }
 
 export function getRegisteredStrategies() {
-  return store.state.studioStrategies.filter((s) => s.registered && s.available);
+  return store.state.studioStrategies.map(resolveRegisteredStrategy).filter(Boolean);
 }
 
-// Compute indicator signals on candles via isolated Python sandbox with caching
+export function reloadRegistryFromDisk() {
+  store.reloadFromDisk();
+  return {
+    total: store.state.studioIndicators.length,
+    available: getRegisteredIndicators().length,
+    unavailable: store.state.studioIndicators.length - getRegisteredIndicators().length,
+    strategies_total: store.state.studioStrategies.length,
+    strategies_available: getRegisteredStrategies().length,
+  };
+}
+
+function indicatorCodeDigest(indDef) {
+  return crypto
+    .createHash('sha256')
+    .update(JSON.stringify({
+      id: indDef.id ?? null,
+      code: indDef.code || '',
+      output_type: indDef.output_type || 'auto',
+      signal_rule: indDef.signal_rule || null,
+    }))
+    .digest('hex')
+    .slice(0, 16);
+}
+
+// Compute indicator signals on candles via isolated Python sandbox with code-hash-aware caching
 export async function computeIndicatorSignal(datasetId, candles, indDef, params = {}, opts = {}) {
   const clean = cleanIndicatorParams(indDef, params);
-  const key = `${datasetId}::${indDef.name}::${indDef.version}::${JSON.stringify(clean)}`;
+  const tag = opts.cacheTag || '1m';
+  const digest = indicatorCodeDigest(indDef);
+  const key = `${datasetId}::${tag}::${indDef.id ?? 'x'}::${indDef.name}::${indDef.version}::${digest}::${JSON.stringify(clean)}`;
   if (store._signalCache.has(key)) return store._signalCache.get(key);
 
   const res = await runPythonSandbox({
@@ -461,6 +747,8 @@ export async function computeIndicatorSignal(datasetId, candles, indDef, params 
     code: indDef.code,
     candles,
     params: clean,
+    output_type: indDef.output_type || 'auto',
+    signal_rule: indDef.signal_rule || null,
     return_signals: true,
   }, opts);
   if (!res.ok) {
@@ -502,6 +790,7 @@ export function buildStrategySpec(input) {
     strategy_name: input.strategy_name || null,
     strategy_ids: Array.isArray(input.strategy_ids) ? [...input.strategy_ids].sort() : null,
     strategy_params: input.strategy_params || null,
+    timeframe: normalizeTimeframe(input.timeframe || '1m') || '1m',
     indicators: items,
     min_votes: minVotes,
     direction,
@@ -664,7 +953,12 @@ export function runBacktest(candles, votes, { min_votes = 1, direction = 'both',
   };
 }
 
-export function computeMetrics(trades, equity, initialCapital, finalCapital = null, minTrades = MIN_TRADES, skippedEntries = 0) {
+export function computeMetrics(trades, equity, initialCapital, finalCapital = null, minTrades = MIN_TRADES, skippedEntries = 0, timeframe = '1m') {
+  const tf = normalizeTimeframe(timeframe) || '1m';
+  const tfMins = TIMEFRAME_MINUTES[tf] || 1;
+  const barsPerDay = Math.max(1, 375 / tfMins);
+  const barsPerYear = 252 * barsPerDay;
+
   const n = trades.length;
   const nets = trades.map((t) => t.net_pnl);
   const wins = nets.filter((v) => v > 0);
@@ -687,13 +981,14 @@ export function computeMetrics(trades, equity, initialCapital, finalCapital = nu
     }
   }
 
-  // Return moments & Sharpe ratio
+  // Return moments, Sharpe ratio & Sortino ratio
   const rets = [];
   for (let i = 1; i < equity.length; i++) {
     if (equity[i - 1] > 0) rets.push((equity[i] - equity[i - 1]) / equity[i - 1]);
   }
   let sharpePerBar = 0;
   let sharpeRatio = 0;
+  let sortinoRatio = 0;
   let skew = 0;
   let kurtosis = 3;
   if (rets.length >= 2) {
@@ -702,12 +997,36 @@ export function computeMetrics(trades, equity, initialCapital, finalCapital = nu
     const sd = Math.sqrt(varR);
     if (sd > 1e-12) {
       sharpePerBar = mu / sd;
-      // Annualized Sharpe assuming intraday 1-min bars (~375/day * 252 days)
-      sharpeRatio = sharpePerBar * Math.sqrt(252 * 375);
+      sharpeRatio = sharpePerBar * Math.sqrt(barsPerYear);
       const m3 = rets.reduce((a, b) => a + ((b - mu) / sd) ** 3, 0) / rets.length;
       const m4 = rets.reduce((a, b) => a + ((b - mu) / sd) ** 4, 0) / rets.length;
       skew = m3;
       kurtosis = m4;
+    }
+    const downSq = rets.reduce((acc, r) => acc + (r < 0 ? r * r : 0), 0) / rets.length;
+    const downSd = Math.sqrt(downSq);
+    if (downSd > 1e-12) {
+      sortinoRatio = (mu / downSd) * Math.sqrt(barsPerYear);
+    }
+  }
+
+  const avgWinVal = wins.length ? grossWin / wins.length : 0;
+  const avgLossVal = losses.length ? -grossLoss / losses.length : 0;
+  const winProb = n ? wins.length / n : 0;
+  const lossProb = n ? losses.length / n : 0;
+  const expectancy = n ? (winProb * avgWinVal - lossProb * Math.abs(avgLossVal)) : 0;
+
+  let holdBarsSum = 0;
+  let holdMinsSum = 0;
+  for (const t of trades) {
+    const bars = Number(t.bars_held || 0);
+    holdBarsSum += bars;
+    const t1 = Date.parse(t.entry_time);
+    const t2 = Date.parse(t.exit_time);
+    if (Number.isFinite(t1) && Number.isFinite(t2) && t2 >= t1) {
+      holdMinsSum += (t2 - t1) / 60000;
+    } else {
+      holdMinsSum += bars * tfMins;
     }
   }
 
@@ -715,14 +1034,21 @@ export function computeMetrics(trades, equity, initialCapital, finalCapital = nu
   for (const t of trades) reasons[t.reason] = (reasons[t.reason] || 0) + 1;
 
   return {
+    timeframe: tf,
     trades: n,
+    winning_trades: wins.length,
+    losing_trades: losses.length,
     net_profit: Math.round(netProfit * 100) / 100,
+    gross_profit: Math.round(grossWin * 100) / 100,
+    gross_loss: Math.round(grossLoss * 100) / 100,
     return_pct: initialCapital ? Math.round((netProfit / initialCapital) * 1000000) / 10000 : 0,
     final_capital: Math.round((finalCapital ?? (initialCapital + netProfit)) * 100) / 100,
     win_rate: n ? Math.round((wins.length / n) * 10000) / 100 : 0,
     profit_factor: Math.round(profitFactor * 10000) / 10000,
     sharpe_per_bar: Math.round(sharpePerBar * 100000) / 100000,
     sharpe_ratio: Math.round(sharpeRatio * 1000) / 1000,
+    sortino_ratio: Math.round(sortinoRatio * 1000) / 1000,
+    expectancy: Math.round(expectancy * 100) / 100,
     return_skew: Math.round(skew * 10000) / 10000,
     return_kurtosis: Math.round(kurtosis * 10000) / 10000,
     returns_obs: rets.length,
@@ -730,8 +1056,10 @@ export function computeMetrics(trades, equity, initialCapital, finalCapital = nu
     max_drawdown_pct: Math.round(maxDdPct * 10000) / 10000,
     recovery_factor: maxDd > 0 ? Math.round((netProfit / maxDd) * 10000) / 10000 : 0,
     avg_trade: n ? Math.round((netProfit / n) * 100) / 100 : 0,
-    avg_win: wins.length ? Math.round((grossWin / wins.length) * 100) / 100 : 0,
-    avg_loss: losses.length ? Math.round((-grossLoss / losses.length) * 100) / 100 : 0,
+    avg_win: Math.round(avgWinVal * 100) / 100,
+    avg_loss: Math.round(avgLossVal * 100) / 100,
+    avg_holding_bars: n ? Math.round((holdBarsSum / n) * 100) / 100 : 0,
+    avg_holding_minutes: n ? Math.round((holdMinsSum / n) * 100) / 100 : 0,
     total_costs: Math.round(trades.reduce((a, t) => a + t.costs, 0) * 100) / 100,
     longs: trades.filter((t) => t.side === 'LONG').length,
     shorts: trades.filter((t) => t.side === 'SHORT').length,
@@ -751,35 +1079,53 @@ export function splitBounds(n, splitCfg = DEFAULT_SPLIT) {
   };
 }
 
-export async function evaluateSpecFull(datasetId, spec, split = 'train', { backtestCfg = DEFAULT_BACKTEST, minTrades = MIN_TRADES, cpuLimitS = 5, memLimitMb = 256 } = {}) {
-  const candles = store.loadCandles(datasetId);
+export async function evaluateSpecFull(datasetId, spec, split = 'train', {
+  timeframe = null,
+  startDate = null,
+  endDate = null,
+  completedOnly = true,
+  backtestCfg = DEFAULT_BACKTEST,
+  minTrades = MIN_TRADES,
+  cpuLimitS = 5,
+  memLimitMb = 256,
+} = {}) {
+  const tf = normalizeTimeframe(timeframe || spec?.timeframe || '1m') || '1m';
+  const loaded = loadCanonicalCandlesForEngine(datasetId, {
+    timeframe: tf,
+    startDate,
+    endDate,
+    completedOnly,
+  });
+  const candles = loaded.candles;
   const bounds = splitBounds(candles.length);
   if (!bounds[split]) throw new Error(`Invalid split: ${split}`);
   const [a, b] = bounds[split];
   const slice = candles.slice(a, b);
+  if (slice.length < 10) {
+    throw new Error(`Not enough candles (${slice.length}) in ${split} split for timeframe ${tf}`);
+  }
+  const prefixCandles = candles.slice(0, b);
   const regMap = Object.fromEntries(getRegisteredIndicators().map((i) => [i.name, i]));
   const stratMap = Object.fromEntries(getRegisteredStrategies().map((s) => [s.id, s]));
 
-  // Compute indicator signals over full candles (causal!) then slice
-  const indSignalsFull = {};
-  for (const item of spec.indicators || []) {
-    const def = regMap[item.name];
-    if (!def) throw new Error(`Indicator '${item.name}' not registered/available`);
-    indSignalsFull[item.name] = await computeIndicatorSignal(datasetId, candles, def, item.params || {}, { cpuLimitS, memLimitMb });
-  }
-
+  // Zero look-ahead: compute indicators/strategies only on prefix [0, b) so future splits are never visible
+  const cacheTag = `${tf}:${startDate || 'min'}:${endDate || 'max'}:n${b}`;
   let votes = new Array(slice.length).fill(0);
   let exitSignals = null;
   let sl = spec.stop_loss_pct;
   let tp = spec.target_pct;
 
-  // If strategy_ids (from Strategy Studio) are attached, run each custom strategy in Python sandbox and combine votes
   if (spec.strategy_ids && spec.strategy_ids.length > 0) {
-    const indPayload = (spec.indicators || []).map((item) => ({
-      name: item.name,
-      code: regMap[item.name].code,
-      params: item.params || {},
-    }));
+    const indPayload = (spec.indicators || []).map((item) => {
+      const def = regMap[item.name];
+      if (!def) throw new Error(`Indicator '${item.name}' not registered/available`);
+      return {
+        name: item.name,
+        code: def.code,
+        output_type: def.output_type || 'auto',
+        params: cleanIndicatorParams(def, item.params || {}),
+      };
+    });
     const stratVotes = new Array(slice.length).fill(0);
     for (const sid of spec.strategy_ids) {
       const sdef = stratMap[sid];
@@ -787,7 +1133,7 @@ export async function evaluateSpecFull(datasetId, spec, split = 'train', { backt
       const sRes = await runPythonSandbox({
         mode: 'strategy',
         code: sdef.code,
-        candles: slice,
+        candles: prefixCandles,
         params: spec.strategy_params?.[sid] || {},
         indicator_codes: indPayload,
       }, { cpuLimitS, memLimitMb });
@@ -795,19 +1141,28 @@ export async function evaluateSpecFull(datasetId, spec, split = 'train', { backt
         throw new Error(`Strategy '${sdef.name}' failed: ${sRes.error?.message || 'runtime error'}`);
       }
       for (let i = 0; i < slice.length; i++) {
-        stratVotes[i] += sRes.signals[i] || 0;
+        stratVotes[i] += sRes.signals[a + i] || 0;
       }
-      if (sRes.exit_signals) {
-        if (!exitSignals) exitSignals = [...sRes.exit_signals];
+      if (sRes.exit_signals && !exitSignals) {
+        exitSignals = sRes.exit_signals.slice(a, b);
       }
       if (sRes.stop_loss_pct != null) sl = sRes.stop_loss_pct;
       if (sRes.target_pct != null) tp = sRes.target_pct;
     }
     votes = stratVotes;
   } else {
-    // Indicator consensus voting across sliced causal signals
+    const indSignalsPrefix = {};
     for (const item of spec.indicators || []) {
-      const sig = indSignalsFull[item.name];
+      const def = regMap[item.name];
+      if (!def) throw new Error(`Indicator '${item.name}' not registered/available`);
+      indSignalsPrefix[item.name] = await computeIndicatorSignal(datasetId, prefixCandles, def, item.params || {}, {
+        cacheTag,
+        cpuLimitS,
+        memLimitMb,
+      });
+    }
+    for (const item of spec.indicators || []) {
+      const sig = indSignalsPrefix[item.name];
       for (let i = 0; i < slice.length; i++) {
         votes[i] += sig[a + i] || 0;
       }
@@ -822,21 +1177,36 @@ export async function evaluateSpecFull(datasetId, spec, split = 'train', { backt
     exit_signals: exitSignals,
     cfg: backtestCfg,
   });
-  const metrics = computeMetrics(bt.trades, bt.equity, backtestCfg.initial_capital, bt.final_capital, minTrades, bt.skipped_entries);
-  return { bt, metrics, slice };
+  const effMinTrades = minTrades;
+  const metrics = computeMetrics(bt.trades, bt.equity, backtestCfg.initial_capital, bt.final_capital, effMinTrades, bt.skipped_entries, tf);
+  return { bt, metrics, slice, timeframe: tf };
 }
 
-export async function runWalkForward(datasetId, spec, { backtestCfg = DEFAULT_BACKTEST, minTrades = MIN_TRADES } = {}) {
-  const candles = store.loadCandles(datasetId);
+export async function runWalkForward(datasetId, spec, {
+  timeframe = null,
+  startDate = null,
+  endDate = null,
+  backtestCfg = DEFAULT_BACKTEST,
+  minTrades = MIN_TRADES,
+} = {}) {
+  const tf = normalizeTimeframe(timeframe || spec?.timeframe || '1m') || '1m';
+  const candles = loadCanonicalCandlesForEngine(datasetId, {
+    timeframe: tf,
+    startDate,
+    endDate,
+    completedOnly: true,
+  }).candles;
   const [a, b] = splitBounds(candles.length).validation;
+  const prefixCandles = candles.slice(0, b);
   const nSegs = DEFAULT_SPLIT.walk_forward_segments;
   const regMap = Object.fromEntries(getRegisteredIndicators().map((i) => [i.name, i]));
+  const cacheTag = `${tf}:${startDate || 'min'}:${endDate || 'max'}:n${b}`;
 
-  const indSignalsFull = {};
+  const indSignalsPrefix = {};
   for (const item of spec.indicators || []) {
     const def = regMap[item.name];
     if (!def) throw new Error(`Indicator '${item.name}' not available`);
-    indSignalsFull[item.name] = await computeIndicatorSignal(datasetId, candles, def, item.params || {});
+    indSignalsPrefix[item.name] = await computeIndicatorSignal(datasetId, prefixCandles, def, item.params || {}, { cacheTag });
   }
 
   const segments = [];
@@ -846,7 +1216,7 @@ export async function runWalkForward(datasetId, spec, { backtestCfg = DEFAULT_BA
     const slice = candles.slice(sa, sb);
     const votes = new Array(slice.length).fill(0);
     for (const item of spec.indicators || []) {
-      const sig = indSignalsFull[item.name];
+      const sig = indSignalsPrefix[item.name];
       for (let i = 0; i < slice.length; i++) votes[i] += sig[sa + i] || 0;
     }
     const bt = runBacktest(slice, votes, {
@@ -871,6 +1241,7 @@ export async function runWalkForward(datasetId, spec, { backtestCfg = DEFAULT_BA
   const validated = (profitable / segments.length >= 0.5) && totalNet > 0 && totalTrades >= minTrades;
   return {
     split: 'validation',
+    timeframe: tf,
     segments,
     profitable_segments: profitable,
     total_segments: segments.length,
@@ -983,18 +1354,36 @@ function sampleParam(p) {
 function objectiveScore(metrics, objective = 'net_profit', minTrades = MIN_TRADES) {
   if (!metrics || metrics.trades < minTrades) return -1e9 + (metrics?.trades || 0);
   if (objective === 'sharpe_ratio') return metrics.sharpe_ratio || 0;
+  if (objective === 'sortino_ratio') return metrics.sortino_ratio || 0;
   if (objective === 'profit_factor') return metrics.profit_factor || 0;
   if (objective === 'recovery_factor') return metrics.recovery_factor || 0;
   if (objective === 'min_drawdown') return metrics.net_profit > 0 ? -(metrics.max_drawdown_pct || 100) : -1e6;
   return metrics.net_profit || 0;
 }
 
-function upsertExperiment({ agent, studyName = null, trialNumber = null, datasetId, split, spec, metrics, durationS = 0, status = 'completed', error = null }) {
-  const hash = specHash(spec);
-  const cfgHash = DEFAULT_SPLIT.train_end + ':' + DEFAULT_BACKTEST.initial_capital;
+function upsertExperiment({
+  agent,
+  studyName = null,
+  trialNumber = null,
+  datasetId,
+  timeframe = '1m',
+  startDate = null,
+  endDate = null,
+  split,
+  spec,
+  metrics,
+  durationS = 0,
+  status = 'completed',
+  error = null,
+  initialCapital = DEFAULT_BACKTEST.initial_capital,
+}) {
+  const tf = normalizeTimeframe(timeframe || spec?.timeframe || '1m') || '1m';
+  const normSpec = { ...spec, timeframe: tf };
+  const hash = specHash(normSpec);
+  const cfgHash = `${DEFAULT_SPLIT.train_end}:${initialCapital}:${tf}:${startDate || 'min'}:${endDate || 'max'}`;
   if (status === 'completed') {
     const dup = store.state.experiments.find(
-      (e) => e.strategy_hash === hash && e.dataset_id === datasetId && e.split === split && e.config_hash === cfgHash && e.status === 'completed'
+      (e) => e.strategy_hash === hash && e.dataset_id === datasetId && (e.timeframe || '1m') === tf && e.split === split && e.config_hash === cfgHash && e.status === 'completed'
     );
     if (dup) return { duplicate: true, row: dup };
   }
@@ -1006,9 +1395,12 @@ function upsertExperiment({ agent, studyName = null, trialNumber = null, dataset
     trial_number: trialNumber,
     strategy_hash: hash,
     dataset_id: datasetId,
+    timeframe: tf,
+    start_date: startDate || null,
+    end_date: endDate || null,
     split,
     config_hash: cfgHash,
-    spec,
+    spec: normSpec,
     metrics,
     eligible: Boolean(metrics?.eligible),
     status,
@@ -1041,13 +1433,49 @@ async function checkPauseAndLimits(worker, cpuLimitPct, ramLimitPct) {
   return true;
 }
 
+function resolveBacktestCfgFromSettings(settings = {}) {
+  return {
+    initial_capital: Number(settings.initial_capital || DEFAULT_BACKTEST.initial_capital),
+    position_pct: Number(settings.position_pct || DEFAULT_BACKTEST.position_pct),
+    lot_size: DEFAULT_BACKTEST.lot_size,
+    brokerage_per_order: settings.brokerage_per_order !== undefined && settings.brokerage_per_order !== '' ? Number(settings.brokerage_per_order) : DEFAULT_BACKTEST.brokerage_per_order,
+    charges_pct: settings.charges_pct !== undefined && settings.charges_pct !== '' ? Number(settings.charges_pct) : DEFAULT_BACKTEST.charges_pct,
+    slippage_points: settings.slippage_points !== undefined && settings.slippage_points !== '' ? Number(settings.slippage_points) : DEFAULT_BACKTEST.slippage_points,
+    no_entry_after_minute: DEFAULT_BACKTEST.no_entry_after_minute,
+    square_off_minute: DEFAULT_BACKTEST.square_off_minute,
+  };
+}
+
+function resolveRequestedTimeframes(settings = {}) {
+  const raw = Array.isArray(settings.timeframes) && settings.timeframes.length
+    ? settings.timeframes
+    : (settings.timeframe ? [settings.timeframe] : ['1m']);
+  const out = [];
+  for (const r of raw) {
+    const tf = normalizeTimeframe(r);
+    if (tf && !out.includes(tf)) out.push(tf);
+  }
+  return out.length ? out : ['1m'];
+}
+
 export function startAutonomousAgents(settings) {
   const datasetId = Number(settings.dataset_id);
-  store.loadCandles(datasetId); // verify dataset exists
-  const indicators = getRegisteredIndicators();
+  getMarketDataset(datasetId);
+  const tfs = resolveRequestedTimeframes(settings);
+  const startDate = settings.start_date || null;
+  const endDate = settings.end_date || null;
+
+  // Verify at least the first timeframe has data in the requested range
+  loadCanonicalCandlesForEngine(datasetId, { timeframe: tfs[0], startDate, endDate, completedOnly: true });
+
+  const allInds = getRegisteredIndicators();
+  const allowedIndNames = Array.isArray(settings.indicator_names) && settings.indicator_names.length
+    ? new Set(settings.indicator_names)
+    : null;
+  const indicators = allowedIndNames ? allInds.filter((i) => allowedIndNames.has(i.name)) : allInds;
   const strategies = getRegisteredStrategies();
   if (indicators.length === 0 && strategies.length === 0) {
-    throw new Error('No registered indicators or strategies found. Register at least one custom indicator in Indicator Studio or strategy in Strategy Studio first.');
+    throw new Error('No registered indicators or strategies matched. Register at least one custom indicator or strategy in the Studios first.');
   }
 
   if (activeWorkers.get('research_agent')?.alive) {
@@ -1061,6 +1489,7 @@ export function startAutonomousAgents(settings) {
   const totalTrialsBudget = Number(settings.n_trials || 0) > 0
     ? Number(settings.n_trials)
     : Math.max(12, Number(settings.cycles || 1) * (Number(settings.population_size || 12) + Number(settings.tuning_trials || 10)));
+  const btCfg = resolveBacktestCfgFromSettings(settings);
 
   const rWorker = {
     name: 'research_agent',
@@ -1083,7 +1512,9 @@ export function startAutonomousAgents(settings) {
   const rState = store.state.agents.research_agent;
   Object.assign(rState, {
     status: 'running',
-    current_task: 'initializing discovery catalogue',
+    current_task: 'initializing multi-timeframe discovery catalogue',
+    current_timeframe: tfs[0],
+    current_combination: null,
     algorithm: settings.algorithm || 'full_cycle',
     trials_processed: 0,
     error_count: 0,
@@ -1091,13 +1522,22 @@ export function startAutonomousAgents(settings) {
     started_at: utcnow(),
     last_heartbeat: utcnow(),
     duplicates_prevented: 0,
-    detail: { indicators_count: indicators.length, strategies_count: strategies.length, max_indicators: maxInd === 0 ? 'unlimited' : capInd },
+    detail: {
+      timeframes: tfs,
+      start_date: startDate,
+      end_date: endDate,
+      indicators_count: indicators.length,
+      strategies_count: strategies.length,
+      max_indicators: maxInd === 0 ? 'unlimited' : capInd,
+    },
   });
 
   const eState = store.state.agents.evaluation_agent;
   Object.assign(eState, {
     status: 'running',
-    current_task: 'monitoring experiment ledger',
+    current_task: 'monitoring multi-timeframe experiment ledger',
+    current_timeframe: tfs[0],
+    current_combination: null,
     algorithm: 'Ledger Audit & DSR/Walk-Forward Ranking',
     trials_processed: 0,
     error_count: 0,
@@ -1107,8 +1547,12 @@ export function startAutonomousAgents(settings) {
     duplicates_prevented: 0,
   });
 
-  addAgentLog('research_agent', 'info', `Research started on dataset #${datasetId}: ${indicators.length} custom indicator(s), ${strategies.length} custom strategy(ies), max_indicators=${maxInd === 0 ? 'unlimited' : capInd}`);
-  addAgentLog('evaluation_agent', 'info', 'Evaluation & Ranking Agent online; auditing ledger and ranking candidates');
+  addAgentLog(
+    'research_agent',
+    'info',
+    `Research started on dataset #${datasetId} across timeframes [${tfs.join(', ')}]: ${indicators.length} indicator(s), ${strategies.length} strategy(ies), max_indicators=${maxInd === 0 ? 'unlimited' : capInd}`
+  );
+  addAgentLog('evaluation_agent', 'info', 'Evaluation & Ranking Agent online; auditing ledger and ranking candidates across timeframes');
   store.save();
 
   // Async background loop for Agent 1
@@ -1122,19 +1566,23 @@ export function startAutonomousAgents(settings) {
     try {
       for (let t = 0; t < totalTrialsBudget; t++) {
         if (!(await checkPauseAndLimits(rWorker, cpuLimitPct, ramLimitPct))) break;
+        const tf = tfs[t % tfs.length];
         rState.last_heartbeat = utcnow();
         rState.progress = Math.min(0.95, t / totalTrialsBudget);
+        rState.current_timeframe = tf;
 
-        // Dynamically re-read registered indicators & strategies so newly updated ones are recognized mid-run!
-        const liveInds = getRegisteredIndicators();
+        // Dynamically re-read registered indicators & strategies so newly updated ones are recognized mid-run
+        const liveAll = getRegisteredIndicators();
+        const liveInds = allowedIndNames ? liveAll.filter((i) => allowedIndNames.has(i.name)) : liveAll;
         const liveStrats = getRegisteredStrategies();
         if (liveInds.length === 0 && liveStrats.length === 0) break;
 
+        // Systematically cover k = 1, 2, 3, 4+ indicator combinations as well as random parameter sampling
         let chosenInds = [];
         if (liveInds.length > 0) {
           const effCap = maxInd > 0 ? Math.min(maxInd, liveInds.length) : liveInds.length;
-          const k = 1 + Math.floor(Math.random() * effCap);
-          const shuffled = [...liveInds].sort(() => Math.random() - 0.5).slice(0, k);
+          const k = 1 + (t < effCap ? t : Math.floor(Math.random() * effCap));
+          const shuffled = [...liveInds].sort(() => Math.random() - 0.5).slice(0, Math.min(k, liveInds.length));
           chosenInds = shuffled.map((ind) => ({
             name: ind.name,
             params: Object.fromEntries((ind.params || []).map((p) => [p.name, sampleParam(p)])),
@@ -1155,10 +1603,12 @@ export function startAutonomousAgents(settings) {
           ]));
         }
 
+        const comboNames = chosenInds.map((i) => i.name).join(' + ');
         const spec = {
-          strategy_name: stratLabel || `${chosenInds.map((i) => i.name).join(' + ')}`,
+          strategy_name: stratLabel || comboNames,
           strategy_ids: chosenStratIds,
           strategy_params: stratParams,
+          timeframe: tf,
           indicators: chosenInds,
           min_votes: chosenInds.length ? 1 + Math.floor(Math.random() * chosenInds.length) : 1,
           direction: randomChoice(['both', 'long', 'short']),
@@ -1166,27 +1616,40 @@ export function startAutonomousAgents(settings) {
           target_pct: randomChoice([0.5, 1.0, 1.5, 2.0]),
         };
 
-        rState.current_task = `evaluating trial ${t + 1}/${totalTrialsBudget}: ${spec.strategy_name}`;
+        rState.current_combination = comboNames || spec.strategy_name;
+        rState.current_task = `[${tf}] trial ${t + 1}/${totalTrialsBudget}: ${spec.strategy_name}`;
+        eState.current_timeframe = tf;
+        eState.current_combination = rState.current_combination;
         const t0 = Date.now();
         try {
-          const { metrics } = await evaluateSpecFull(datasetId, spec, 'train', { memLimitMb: memMb });
+          const { metrics } = await evaluateSpecFull(datasetId, spec, 'train', {
+            timeframe: tf,
+            startDate,
+            endDate,
+            backtestCfg: btCfg,
+            memLimitMb: memMb,
+          });
           const dur = Math.round(((Date.now() - t0) / 1000) * 1000) / 1000;
           const { duplicate } = upsertExperiment({
             agent: 'research_agent',
             trialNumber: t + 1,
             datasetId,
+            timeframe: tf,
+            startDate,
+            endDate,
             split: 'train',
             spec,
             metrics,
             durationS: dur,
+            initialCapital: btCfg.initial_capital,
           });
           if (duplicate) {
             rState.duplicates_prevented += 1;
           } else {
             rState.trials_processed += 1;
             const sc = objectiveScore(metrics, objective);
-            candidates.push({ spec, metrics, score: sc });
-            addAgentLog('research_agent', 'info', `Trial #${t + 1} (${spec.strategy_name}): net=${metrics.net_profit}, sharpe=${metrics.sharpe_ratio}, trades=${metrics.trades}`);
+            candidates.push({ spec, timeframe: tf, metrics, score: sc });
+            addAgentLog('research_agent', 'info', `[${tf}] Trial #${t + 1} (${spec.strategy_name}): net=${metrics.net_profit}, sharpe=${metrics.sharpe_ratio}, sortino=${metrics.sortino_ratio}, trades=${metrics.trades}`);
           }
         } catch (err) {
           rState.error_count += 1;
@@ -1194,16 +1657,20 @@ export function startAutonomousAgents(settings) {
             agent: 'research_agent',
             trialNumber: t + 1,
             datasetId,
+            timeframe: tf,
+            startDate,
+            endDate,
             split: 'train',
             spec,
             metrics: null,
             status: 'failed',
             error: err.message,
+            initialCapital: btCfg.initial_capital,
           });
-          addAgentLog('research_agent', 'error', `Trial #${t + 1} failed: ${err.message}`);
+          addAgentLog('research_agent', 'error', `[${tf}] Trial #${t + 1} failed: ${err.message}`);
         }
         store.save();
-        await sleep(50);
+        await sleep(40);
       }
 
       // Walk-forward validation on top K discovered candidates
@@ -1214,7 +1681,9 @@ export function startAutonomousAgents(settings) {
         for (let i = 0; i < topK.length; i++) {
           if (rWorker.stopped) break;
           const c = topK[i];
-          const wf = await runWalkForward(datasetId, c.spec);
+          rState.current_timeframe = c.timeframe;
+          rState.current_combination = c.spec.strategy_name;
+          const wf = await runWalkForward(datasetId, c.spec, { timeframe: c.timeframe, startDate, endDate, backtestCfg: btCfg });
           store.state.validations.push({
             id: store.state.nextIds.validation++,
             created_at: utcnow(),
@@ -1222,12 +1691,11 @@ export function startAutonomousAgents(settings) {
             dataset_id: datasetId,
             ...wf,
           });
-          // Also evaluate validation split metrics
           try {
-            const { metrics: valM } = await evaluateSpecFull(datasetId, c.spec, 'validation');
-            upsertExperiment({ agent: 'research_agent', datasetId, split: 'validation', spec: c.spec, metrics: valM });
+            const { metrics: valM } = await evaluateSpecFull(datasetId, c.spec, 'validation', { timeframe: c.timeframe, startDate, endDate, backtestCfg: btCfg });
+            upsertExperiment({ agent: 'research_agent', datasetId, timeframe: c.timeframe, startDate, endDate, split: 'validation', spec: c.spec, metrics: valM, initialCapital: btCfg.initial_capital });
           } catch { /* ignore */ }
-          addAgentLog('research_agent', 'info', `Walk-forward ${specHash(c.spec)}: ${wf.profitable_segments}/${wf.total_segments} segments profitable, validated=${wf.validated}`);
+          addAgentLog('research_agent', 'info', `[${c.timeframe}] Walk-forward ${specHash(c.spec)}: ${wf.profitable_segments}/${wf.total_segments} segments profitable, validated=${wf.validated}`);
         }
       }
 
@@ -1345,7 +1813,12 @@ export function agentsStatus() {
 // ---------------------------------------------------------------------------
 export function startOptimizationStudy(cfg) {
   const datasetId = Number(cfg.dataset_id);
-  store.loadCandles(datasetId);
+  getMarketDataset(datasetId);
+  const tfs = resolveRequestedTimeframes(cfg);
+  const startDate = cfg.start_date || null;
+  const endDate = cfg.end_date || null;
+  loadCanonicalCandlesForEngine(datasetId, { timeframe: tfs[0], startDate, endDate, completedOnly: true });
+
   const indicators = getRegisteredIndicators();
   const strategies = getRegisteredStrategies();
   if (indicators.length === 0 && strategies.length === 0) {
@@ -1359,7 +1832,7 @@ export function startOptimizationStudy(cfg) {
     study_name: cfg.study_name,
     created_at: utcnow(),
     status: 'running',
-    config: cfg,
+    config: { ...cfg, timeframes: tfs },
     error: null,
   };
   store.state.optimizationRuns = [
@@ -1375,7 +1848,7 @@ export function startOptimizationStudy(cfg) {
     stopped: false,
     deadlineMs: durationLimitS > 0 ? Date.now() + durationLimitS * 1000 : null,
     progress: 0,
-    current_task: 'initializing study',
+    current_task: 'initializing multi-timeframe study',
     status: 'running',
   };
   activeWorkers.set(key, worker);
@@ -1387,15 +1860,17 @@ export function startOptimizationStudy(cfg) {
     const cpuLimitPct = Number(cfg.cpu_limit_pct || 90);
     const ramLimitPct = Number(cfg.ram_limit_pct || 85);
     const memMb = Number(cfg.ram_limit_mb || 256);
+    const btCfg = resolveBacktestCfgFromSettings(cfg);
 
     try {
       for (let t = 0; t < nTrials; t++) {
         if (!(await checkPauseAndLimits(worker, cpuLimitPct, ramLimitPct))) break;
+        const tf = tfs[t % tfs.length];
         const liveInds = getRegisteredIndicators();
         const liveStrats = getRegisteredStrategies();
         const effCap = maxInd > 0 ? Math.min(maxInd, Math.max(1, liveInds.length)) : Math.max(1, liveInds.length);
-        const k = liveInds.length ? (1 + Math.floor(Math.random() * effCap)) : 0;
-        const chosenInds = [...liveInds].sort(() => Math.random() - 0.5).slice(0, k).map((ind) => ({
+        const k = liveInds.length ? (1 + (t < effCap ? t : Math.floor(Math.random() * effCap))) : 0;
+        const chosenInds = [...liveInds].sort(() => Math.random() - 0.5).slice(0, Math.min(k, liveInds.length)).map((ind) => ({
           name: ind.name,
           params: Object.fromEntries((ind.params || []).map((p) => [p.name, sampleParam(p)])),
         }));
@@ -1404,26 +1879,37 @@ export function startOptimizationStudy(cfg) {
           strategy_name: pickedStrat.length ? pickedStrat[0].name : chosenInds.map((i) => i.name).join(' + '),
           strategy_ids: pickedStrat.length ? pickedStrat.map((s) => s.id) : null,
           strategy_params: pickedStrat.length ? Object.fromEntries(pickedStrat.map((s) => [s.id, Object.fromEntries((s.params || []).map((p) => [p.name, sampleParam(p)]))])) : null,
+          timeframe: tf,
           indicators: chosenInds,
           min_votes: chosenInds.length ? 1 + Math.floor(Math.random() * chosenInds.length) : 1,
           direction: randomChoice(['both', 'long', 'short']),
           stop_loss_pct: randomChoice([0.3, 0.5, 0.8, 1.0]),
           target_pct: randomChoice([0.5, 1.0, 1.5, 2.0]),
         };
-        worker.current_task = `trial ${t + 1}/${nTrials} (${spec.strategy_name})`;
+        worker.current_task = `[${tf}] trial ${t + 1}/${nTrials} (${spec.strategy_name})`;
         worker.progress = (t + 1) / nTrials;
         const t0 = Date.now();
         try {
-          const { metrics } = await evaluateSpecFull(datasetId, spec, 'train', { memLimitMb: memMb });
+          const { metrics } = await evaluateSpecFull(datasetId, spec, 'train', {
+            timeframe: tf,
+            startDate,
+            endDate,
+            backtestCfg: btCfg,
+            memLimitMb: memMb,
+          });
           upsertExperiment({
             agent: 'optuna',
             studyName: cfg.study_name,
             trialNumber: t + 1,
             datasetId,
+            timeframe: tf,
+            startDate,
+            endDate,
             split: 'train',
             spec,
             metrics,
             durationS: Math.round(((Date.now() - t0) / 1000) * 1000) / 1000,
+            initialCapital: btCfg.initial_capital,
           });
         } catch (err) {
           upsertExperiment({
@@ -1431,11 +1917,15 @@ export function startOptimizationStudy(cfg) {
             studyName: cfg.study_name,
             trialNumber: t + 1,
             datasetId,
+            timeframe: tf,
+            startDate,
+            endDate,
             split: 'train',
             spec,
             metrics: null,
             status: 'failed',
             error: err.message,
+            initialCapital: btCfg.initial_capital,
           });
         }
         store.save();
@@ -1483,22 +1973,40 @@ export function controlOptimizationStudy(studyName, action) {
 export const RANKINGS = {
   profit: ['net_profit', true, 'Highest net profit'],
   sharpe_ratio: ['sharpe_ratio', true, 'Highest Sharpe ratio'],
-  win_rate: ['win_rate', true, 'Highest win rate'],
+  sortino_ratio: ['sortino_ratio', true, 'Highest Sortino ratio'],
   profit_factor: ['profit_factor', true, 'Highest profit factor'],
+  win_rate: ['win_rate', true, 'Highest win rate'],
   drawdown: ['max_drawdown_pct', false, 'Lowest maximum drawdown'],
   risk_adjusted: ['recovery_factor', true, 'Best risk-adjusted (net profit / max drawdown)'],
   walk_forward: [null, true, 'Best walk-forward validated strategies'],
 };
 
-export function getLeaderboard(rankingKey, datasetId, { top = 50, split = 'train' } = {}) {
+export function getLeaderboard(rankingKey, datasetId, { top = 50, split = 'train', timeframe = 'all', indicator = '', numIndicators = 0 } = {}) {
   if (!RANKINGS[rankingKey]) throw new Error(`Unknown ranking: ${rankingKey}`);
   const id = Number(datasetId);
-  const completed = store.state.experiments.filter(
+  const normTf = timeframe && timeframe !== 'all' ? normalizeTimeframe(timeframe) : null;
+
+  let completed = store.state.experiments.filter(
     (e) => e.dataset_id === id && e.split === split && e.status === 'completed' && e.eligible && e.metrics
   );
+  if (normTf) {
+    completed = completed.filter((e) => (e.timeframe || e.spec?.timeframe || '1m') === normTf);
+  }
+  if (indicator) {
+    completed = completed.filter((e) => (e.spec?.indicators || []).some((i) => i.name === indicator));
+  }
+  if (Number(numIndicators) > 0) {
+    const cnt = Number(numIndicators);
+    completed = completed.filter((e) => {
+      const k = (e.spec?.indicators || []).length;
+      return cnt >= 4 ? k >= 4 : k === cnt;
+    });
+  }
+
   const latestByHash = new Map();
   for (const e of completed) {
-    latestByHash.set(e.strategy_hash, e);
+    const tfKey = e.timeframe || e.spec?.timeframe || '1m';
+    latestByHash.set(`${e.strategy_hash}::${tfKey}`, e);
   }
   const valsByHash = new Map();
   for (const v of store.state.validations) {
@@ -1520,6 +2028,7 @@ export function getLeaderboard(rankingKey, datasetId, { top = 50, split = 'train
     return {
       id: e.id,
       strategy_hash: e.strategy_hash,
+      timeframe: e.timeframe || e.spec?.timeframe || '1m',
       spec: e.spec,
       metrics: e.metrics,
       created_at: e.created_at,
@@ -1542,7 +2051,10 @@ export function getLeaderboard(rankingKey, datasetId, { top = 50, split = 'train
     rows.sort((a, b) => {
       const av = a.metrics[metric] ?? 0;
       const bv = b.metrics[metric] ?? 0;
-      return higher ? (bv - av) : (av - bv);
+      const cmp = higher ? (bv - av) : (av - bv);
+      if (cmp !== 0) return cmp;
+      // Tiebreak win_rate & others by net_profit so win_rate never acts as sole unconstrained criterion
+      return (b.metrics.net_profit ?? 0) - (a.metrics.net_profit ?? 0);
     });
   }
   return rows.slice(0, top).map((r, idx) => ({ rank: idx + 1, ...r }));

@@ -10,7 +10,10 @@ export async function api(path, options = {}) {
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
   if (!res.ok) {
     const detail = data && data.detail ? (typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail)) : res.statusText;
-    throw new Error(detail);
+    const err = new Error(detail);
+    err.status = res.status;
+    err.data = data;
+    throw err;
   }
   return data;
 }

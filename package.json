@@ -8,7 +8,8 @@
     "build": "vite build frontend",
     "preview": "NODE_ENV=production node server.js",
     "start": "NODE_ENV=production node server.js",
-    "lint": "node --check server.js && node --input-type=module -e \"import('fs').then(()=>console.log('Syntax OK'))\""
+    "lint": "node --check server.js && node --check server_engine.js && node --input-type=module -e \"import('fs').then(()=>console.log('Syntax OK'))\"",
+    "test": "python3 -m unittest discover -s tests -p \"test_*.py\" -v && node --test tests/test_studio_and_api.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^6.3.0",

@@ -31,9 +31,10 @@ export default function Dashboard() {
       <div className="page-head">
         <div>
           <h1>Dashboard</h1>
-          <div className="muted">Live figures from the dynamic custom registries, database ledger, and autonomous workers</div>
+          <div className="muted">Live figures from the Market Data terminal, dynamic custom registries, database ledger, and autonomous workers</div>
         </div>
         <div className="card-actions">
+          <Link to="/market-data"><button>Market Data</button></Link>
           <Link to="/indicator-studio"><button>+ Indicator Studio</button></Link>
           <Link to="/strategy-studio"><button className="primary">+ Strategy Studio</button></Link>
         </div>
@@ -43,11 +44,23 @@ export default function Dashboard() {
         <Stat label="Custom Indicators" value={d.indicators} hint={`${d.indicators_total ?? d.indicators} total in studio`} />
         <Stat label="Custom Strategies" value={d.strategies_registered ?? 0} hint={`${d.strategies_total ?? 0} total in studio`} />
         <Stat label="Combinations Tested" value={d.strategies_discovered} hint={`${d.eligible_strategies} eligible · ${d.validated_strategies} validated`} />
-        <Stat label="Total Trials" value={totalTrials} hint={`${t.completed} complete · ${t.pruned} pruned · ${t.failed} failed`} />
-        <Stat label="Best Net Profit" value={d.best_net_profit === null ? '—' : fmtMoney(d.best_net_profit)} hint="eligible, train split" />
-        <Stat label="Best Sharpe Ratio" value={d.best_sharpe_ratio === null || d.best_sharpe_ratio === undefined ? '—' : fmtNum(d.best_sharpe_ratio)} hint="annualized, train split" />
+        <Stat label="Total Experiments" value={totalTrials} hint={`${t.completed} complete · ${t.pruned} pruned · ${t.failed} failed`} />
+        <Stat label="Active Research TF" value={d.current_timeframe || 'Idle'} hint={d.current_combination || 'Start AI Agents to search'} />
+        <Stat label="Best Net Profit" value={d.best_net_profit === null ? '—' : fmtMoney(d.best_net_profit)} tone={d.best_net_profit > 0 ? 'good' : ''} hint="eligible, train split" />
         <Stat label="Best Win Rate" value={d.best_win_rate === null ? '—' : fmtPct(d.best_win_rate)} hint="eligible, train split" />
+        <Stat label="Best Profit Factor" value={d.best_profit_factor === null || d.best_profit_factor === undefined ? '—' : fmtNum(d.best_profit_factor)} hint="eligible, train split" />
+        <Stat label="Lowest Drawdown" value={d.lowest_drawdown_pct === null || d.lowest_drawdown_pct === undefined ? '—' : fmtPct(d.lowest_drawdown_pct)} hint="profitable strategies" />
+        <Stat label="Best Sharpe Ratio" value={d.best_sharpe_ratio === null || d.best_sharpe_ratio === undefined ? '—' : fmtNum(d.best_sharpe_ratio)} hint="annualized, train split" />
       </div>
+      {d.best_overall_strategy && (
+        <div className="info-box">
+          Best Overall Strategy: <strong className="mono">{d.best_overall_strategy.strategy_name}</strong> ({d.best_overall_strategy.timeframe}) ·
+          Net Profit <strong>{fmtMoney(d.best_overall_strategy.net_profit)}</strong> ·
+          Win Rate {fmtPct(d.best_overall_strategy.win_rate)} ·
+          PF {fmtNum(d.best_overall_strategy.profit_factor)} ·
+          Max DD {fmtPct(d.best_overall_strategy.max_drawdown_pct)}
+        </div>
+      )}
       <div className="split-2" style={{ marginTop: 14 }}>
         <Card title="System status">
           <div className="grid stats">
@@ -62,6 +75,7 @@ export default function Dashboard() {
             columns={[
               { key: 'name', label: 'Agent' },
               { key: 'status', label: 'Status', render: (r) => <Badge status={r.status} /> },
+              { key: 'current_timeframe', label: 'Timeframe', render: (r) => r.current_timeframe || '—' },
               { key: 'trials_processed', label: 'Processed', align: 'right' },
               { key: 'last_heartbeat', label: 'Heartbeat', render: (r) => fmtTime(r.last_heartbeat) },
             ]}
@@ -79,7 +93,7 @@ export default function Dashboard() {
             { key: 'message', label: 'Message' },
           ]}
           rows={d.recent_activity}
-          empty="No activity yet. Register indicators or strategies in the Studios, then start the agents or an optimization run."
+          empty="No activity yet. Import market data, register indicators or strategies in the Studios, then start the agents or an optimization run."
         />
       </Card>
     </>

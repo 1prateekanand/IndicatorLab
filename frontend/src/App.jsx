@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
+import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { AppContext } from './context.js';
 import { get, post } from './api.js';
 import { ErrorBox } from './components/ui.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import Agents from './pages/Agents.jsx';
+import MarketData from './pages/MarketData.jsx';
 import IndicatorStudio from './pages/IndicatorStudio.jsx';
 import StrategyStudio from './pages/StrategyStudio.jsx';
 import Optimization from './pages/Optimization.jsx';
@@ -16,6 +17,7 @@ import Analytics from './pages/Analytics.jsx';
 const NAV = [
   ['/dashboard', 'Dashboard'],
   ['/agents', 'AI Agents'],
+  ['/market-data', 'Market Data'],
   ['/indicator-studio', 'Indicator Studio'],
   ['/strategy-studio', 'Strategy Studio'],
   ['/optimization', 'Optimization'],
@@ -35,6 +37,9 @@ export default function App() {
   const [synthForm, setSynthForm] = useState({ name: 'SYNTH_1m_demo', days: 60, seed: 42 });
   const [csvForm, setCsvForm] = useState({ name: '', symbol: '', timeframe: '1min', csv_text: '' });
 
+  const location = useLocation();
+  const isMarketData = location.pathname === '/market-data';
+
   const reloadDatasets = useCallback(async () => {
     try {
       const list = await get('/api/datasets');
@@ -50,6 +55,12 @@ export default function App() {
   }, []);
 
   useEffect(() => { reloadDatasets(); }, [reloadDatasets]);
+
+  useEffect(() => {
+    if (!online || datasets.length > 0) return;
+    const t = setTimeout(reloadDatasets, 2000);
+    return () => clearTimeout(t);
+  }, [online, datasets.length, reloadDatasets]);
 
   const setDatasetId = (id) => {
     localStorage.setItem('il_dataset', String(id));
@@ -133,22 +144,25 @@ export default function App() {
           </div>
         </aside>
         <main className="content">
-          <div className="topbar" style={{ gap: 10, alignItems: 'center' }}>
-            <label className="dataset-picker">
-              <span>Dataset</span>
-              <select value={datasetId || ''} onChange={(e) => setDatasetId(Number(e.target.value))}>
-                {datasets.length === 0 && <option value="">No datasets imported</option>}
-                {datasets.map((d) => (
-                  <option key={d.id} value={d.id}>{d.name} ({d.symbol}, {d.rows.toLocaleString()} bars)</option>
-                ))}
-              </select>
-            </label>
-            <button onClick={() => { setDsErr(null); setDsModal(true); }}>+ Import Dataset</button>
-          </div>
+          {!isMarketData && (
+            <div className="topbar" style={{ gap: 10, alignItems: 'center' }}>
+              <label className="dataset-picker">
+                <span>Dataset</span>
+                <select value={datasetId || ''} onChange={(e) => setDatasetId(Number(e.target.value))}>
+                  {datasets.length === 0 && <option value="">No datasets imported</option>}
+                  {datasets.map((d) => (
+                    <option key={d.id} value={d.id}>{d.name} ({d.symbol}, {d.rows.toLocaleString()} bars)</option>
+                  ))}
+                </select>
+              </label>
+              <button onClick={() => { setDsErr(null); setDsModal(true); }}>+ Import Dataset</button>
+            </div>
+          )}
           <Routes>
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/agents" element={<Agents />} />
+            <Route path="/market-data" element={<MarketData />} />
             <Route path="/indicator-studio" element={<IndicatorStudio />} />
             <Route path="/strategy-studio" element={<StrategyStudio />} />
             <Route path="/indicators" element={<Navigate to="/indicator-studio" replace />} />

@@ -7,8 +7,9 @@ import { useNavigate } from 'react-router-dom';
 const TABS = [
   ['profit', 'Highest net profit'],
   ['sharpe_ratio', 'Highest Sharpe ratio'],
-  ['win_rate', 'Highest win rate'],
+  ['sortino_ratio', 'Highest Sortino ratio'],
   ['profit_factor', 'Profit factor'],
+  ['win_rate', 'Highest win rate'],
   ['drawdown', 'Lowest drawdown'],
   ['risk_adjusted', 'Risk-adjusted'],
   ['walk_forward', 'Walk-forward validated'],
@@ -32,6 +33,8 @@ export default function Results() {
   const [tab, setTab] = useState('profit');
   const [top, setTop] = useState(50);
   const [split, setSplit] = useState('train');
+  const [tfFilter, setTfFilter] = useState('all');
+  const [indCountFilter, setIndCountFilter] = useState(0);
   const [rows, setRows] = useState([]);
   const [detail, setDetail] = useState(null);
   const [compareIds, setCompareIds] = useState([]);
@@ -43,8 +46,10 @@ export default function Results() {
 
   useEffect(() => {
     if (!datasetId) return;
-    run(async () => setRows(await get(`/api/results/rankings/${tab}?dataset_id=${datasetId}&top=${top}&split=${split}`)));
-  }, [datasetId, tab, top, split]);
+    run(async () => setRows(
+      await get(`/api/results/rankings/${tab}?dataset_id=${datasetId}&top=${top}&split=${split}&timeframe=${tfFilter}&num_indicators=${indCountFilter}`)
+    ));
+  }, [datasetId, tab, top, split, tfFilter, indCountFilter]);
 
   const open = (row) => run(async () => setDetail(await get(`/api/results/strategies/${row.strategy_hash}?dataset_id=${datasetId}`)));
   const toBacktest = () => {
@@ -55,10 +60,11 @@ export default function Results() {
 
   const toggleCompare = (row, e) => {
     e.stopPropagation();
+    const key = `${row.strategy_hash}::${row.timeframe || '1m'}`;
     setCompareIds((prev) =>
-      prev.includes(row.strategy_hash)
-        ? prev.filter((h) => h !== row.strategy_hash)
-        : [...prev.slice(-2), row.strategy_hash]
+      prev.includes(key)
+        ? prev.filter((h) => h !== key)
+        : [...prev.slice(-2), key]
     );
   };
 
@@ -74,7 +80,7 @@ export default function Results() {
       if (robustFilter === 'oos' && !r.out_of_sample) return false;
       if (robustFilter === 'dsr' && !r.dsr?.significant) return false;
       if (!q) return true;
-      const hay = `${r.spec?.strategy_name || ''} ${(r.spec?.indicators || []).map((i) => i.name).join(' ')} ${r.strategy_hash}`.toLowerCase();
+      const hay = `${r.spec?.strategy_name || ''} ${r.timeframe || ''} ${(r.spec?.indicators || []).map((i) => i.name).join(' ')} ${r.strategy_hash}`.toLowerCase();
       return hay.includes(q);
     });
     if (sortCol) {
@@ -84,6 +90,7 @@ export default function Results() {
           if (sortCol === 'win_rate') return r.metrics?.win_rate ?? -Infinity;
           if (sortCol === 'profit_factor') return r.metrics?.profit_factor ?? -Infinity;
           if (sortCol === 'sharpe_ratio') return r.metrics?.sharpe_ratio ?? -Infinity;
+          if (sortCol === 'sortino_ratio') return r.metrics?.sortino_ratio ?? -Infinity;
           if (sortCol === 'max_drawdown_pct') return r.metrics?.max_drawdown_pct ?? Infinity;
           if (sortCol === 'trades') return r.metrics?.trades ?? 0;
           if (sortCol === 'oos') return r.out_of_sample?.metrics?.net_profit ?? -Infinity;
@@ -98,7 +105,7 @@ export default function Results() {
   }, [rows, search, robustFilter, sortCol, sortDir]);
 
   const compareRows = useMemo(
-    () => rows.filter((r) => compareIds.includes(r.strategy_hash)),
+    () => rows.filter((r) => compareIds.includes(`${r.strategy_hash}::${r.timeframe || '1m'}`)),
     [rows, compareIds]
   );
 
@@ -131,7 +138,7 @@ export default function Results() {
         <div>
           <h1>Results</h1>
           <div className="muted">
-            Discovered indicator &amp; strategy combinations ranked from stored experiments. Click column headers to sort, select checkboxes to compare, or click a row for full details.
+            Discovered multi-timeframe indicator &amp; strategy combinations ranked from stored experiments. Filter by timeframe, indicator, or combination size, or click any row for full diagnostics.
           </div>
         </div>
       </div>
@@ -147,6 +154,21 @@ export default function Results() {
         <div className="form-grid" style={{ marginBottom: 12 }}>
           <Field label="Search strategy / indicator">
             <input placeholder="Filter by name, indicator, or hash..." value={search} onChange={(e) => setSearch(e.target.value)} />
+          </Field>
+          <Field label="Timeframe">
+            <select value={tfFilter} onChange={(e) => setTfFilter(e.target.value)}>
+              <option value="all">All Timeframes</option>
+              {['1m', '5m', '10m', '1H', '4H'].map((tf) => <option key={tf} value={tf}>{tf}</option>)}
+            </select>
+          </Field>
+          <Field label="# of Indicators">
+            <select value={indCountFilter} onChange={(e) => setIndCountFilter(Number(e.target.value))}>
+              <option value={0}>Any count</option>
+              <option value={1}>1 indicator</option>
+              <option value={2}>2 indicators</option>
+              <option value={3}>3 indicators</option>
+              <option value={4}>4+ indicators</option>
+            </select>
           </Field>
           <Field label="Robustness filter">
             <select value={robustFilter} onChange={(e) => setRobustFilter(e.target.value)}>
@@ -181,55 +203,60 @@ export default function Results() {
               <thead>
                 <tr>
                   <th />
-                  <th>#</th>
+                  <th>Rank</th>
                   <th>Strategy</th>
+                  <th>Timeframe</th>
                   <th>Indicators</th>
-                  <th>Parameters</th>
-                  <th className="right sortable" onClick={() => toggleSort('net_profit')}>Net Profit</th>
-                  <th className="right sortable" onClick={() => toggleSort('win_rate')}>Win Rate</th>
-                  <th className="right sortable" onClick={() => toggleSort('profit_factor')}>Profit Factor</th>
-                  <th className="right sortable" onClick={() => toggleSort('sharpe_ratio')}>Sharpe Ratio</th>
-                  <th className="right sortable" onClick={() => toggleSort('max_drawdown_pct')}>Max Drawdown</th>
                   <th className="right sortable" onClick={() => toggleSort('trades')}>Trades</th>
-                  <th className="right sortable" onClick={() => toggleSort('oos')}>OOS Performance</th>
+                  <th className="right sortable" onClick={() => toggleSort('win_rate')}>Win Rate</th>
+                  <th className="right sortable" onClick={() => toggleSort('net_profit')}>Net Profit</th>
+                  <th className="right sortable" onClick={() => toggleSort('profit_factor')}>Profit Factor</th>
+                  <th className="right sortable" onClick={() => toggleSort('max_drawdown_pct')}>Max Drawdown</th>
+                  <th className="right sortable" onClick={() => toggleSort('sharpe_ratio')}>Sharpe</th>
+                  <th className="right sortable" onClick={() => toggleSort('sortino_ratio')}>Sortino</th>
+                  <th className="right sortable" onClick={() => toggleSort('oos')}>OOS</th>
                   <th>Robustness</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredAndSorted.map((r) => (
-                  <tr
-                    key={r.strategy_hash}
-                    className={`clickable ${detail?.hash === r.strategy_hash ? 'selected' : ''}`}
-                    onClick={() => open(r)}
-                  >
-                    <td onClick={(e) => toggleCompare(r, e)}>
-                      <input type="checkbox" readOnly checked={compareIds.includes(r.strategy_hash)} />
-                    </td>
-                    <td className="right">{r.rank}</td>
-                    <td>
-                      <strong className="mono">{r.spec?.strategy_name || r.strategy_hash}</strong>
-                      <div className="muted mono" style={{ fontSize: 11 }}>{r.strategy_hash}</div>
-                    </td>
-                    <td>
-                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                        {(r.spec?.indicators || []).map((i) => (
-                          <span key={i.name} className="chip mono">{i.name}</span>
-                        ))}
-                      </div>
-                    </td>
-                    <td className="mono" style={{ maxWidth: 240, fontSize: 11 }}>{formatParams(r.spec)}</td>
-                    <td className="right" style={{ color: r.metrics.net_profit >= 0 ? 'var(--good)' : 'var(--bad)' }}>
-                      {fmtMoney(r.metrics.net_profit)}
-                    </td>
-                    <td className="right">{fmtPct(r.metrics.win_rate)}</td>
-                    <td className="right">{fmtNum(r.metrics.profit_factor)}</td>
-                    <td className="right">{fmtNum(r.metrics.sharpe_ratio ?? 0)}</td>
-                    <td className="right">{fmtMoney(r.metrics.max_drawdown)} ({fmtPct(r.metrics.max_drawdown_pct)})</td>
-                    <td className="right">{r.metrics.trades}</td>
-                    <td className="right">{renderOos(r)}</td>
-                    <td>{renderRobustness(r)}</td>
-                  </tr>
-                ))}
+                {filteredAndSorted.map((r) => {
+                  const rowKey = `${r.strategy_hash}::${r.timeframe || '1m'}`;
+                  return (
+                    <tr
+                      key={rowKey}
+                      className={`clickable ${detail?.hash === r.strategy_hash ? 'selected' : ''}`}
+                      onClick={() => open(r)}
+                    >
+                      <td onClick={(e) => toggleCompare(r, e)}>
+                        <input type="checkbox" readOnly checked={compareIds.includes(rowKey)} />
+                      </td>
+                      <td className="right">{r.rank}</td>
+                      <td>
+                        <strong className="mono">{r.spec?.strategy_name || r.strategy_hash}</strong>
+                        <div className="muted mono" style={{ fontSize: 11 }}>{formatParams(r.spec)}</div>
+                      </td>
+                      <td><span className="badge info">{r.timeframe || r.spec?.timeframe || '1m'}</span></td>
+                      <td>
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                          {(r.spec?.indicators || []).map((i) => (
+                            <span key={i.name} className="chip mono">{i.name}</span>
+                          ))}
+                        </div>
+                      </td>
+                      <td className="right">{r.metrics.trades}</td>
+                      <td className="right">{fmtPct(r.metrics.win_rate)}</td>
+                      <td className="right" style={{ color: r.metrics.net_profit >= 0 ? 'var(--good)' : 'var(--bad)' }}>
+                        {fmtMoney(r.metrics.net_profit)}
+                      </td>
+                      <td className="right">{fmtNum(r.metrics.profit_factor)}</td>
+                      <td className="right">{fmtMoney(r.metrics.max_drawdown)} ({fmtPct(r.metrics.max_drawdown_pct)})</td>
+                      <td className="right">{fmtNum(r.metrics.sharpe_ratio ?? 0)}</td>
+                      <td className="right">{fmtNum(r.metrics.sortino_ratio ?? 0)}</td>
+                      <td className="right">{renderOos(r)}</td>
+                      <td>{renderRobustness(r)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -239,16 +266,18 @@ export default function Results() {
       {compareRows.length > 0 && (
         <Card title={`Strategy Comparison (${compareRows.length}/3)`} actions={<button className="ghost" onClick={() => setCompareIds([])}>Clear</button>}>
           <Table
-            rowKey={(r) => r.strategy_hash}
+            rowKey={(r) => `${r.strategy_hash}::${r.timeframe || '1m'}`}
             columns={[
               { key: 'strategy', label: 'Strategy', render: (r) => <span className="mono">{r.spec?.strategy_name || r.strategy_hash}</span> },
+              { key: 'timeframe', label: 'TF', render: (r) => <Badge status={r.timeframe || '1m'} /> },
               { key: 'indicators', label: 'Indicators', render: (r) => (r.spec?.indicators || []).map((i) => i.name).join(', ') },
-              { key: 'net_profit', label: 'Net Profit', align: 'right', render: (r) => fmtMoney(r.metrics.net_profit) },
-              { key: 'sharpe_ratio', label: 'Sharpe', align: 'right', render: (r) => fmtNum(r.metrics.sharpe_ratio ?? 0) },
+              { key: 'trades', label: 'Trades', align: 'right', render: (r) => r.metrics.trades },
               { key: 'win_rate', label: 'Win Rate', align: 'right', render: (r) => fmtPct(r.metrics.win_rate) },
+              { key: 'net_profit', label: 'Net Profit', align: 'right', render: (r) => fmtMoney(r.metrics.net_profit) },
               { key: 'profit_factor', label: 'PF', align: 'right', render: (r) => fmtNum(r.metrics.profit_factor) },
               { key: 'max_dd', label: 'Max DD %', align: 'right', render: (r) => fmtPct(r.metrics.max_drawdown_pct) },
-              { key: 'trades', label: 'Trades', align: 'right', render: (r) => r.metrics.trades },
+              { key: 'sharpe_ratio', label: 'Sharpe', align: 'right', render: (r) => fmtNum(r.metrics.sharpe_ratio ?? 0) },
+              { key: 'sortino_ratio', label: 'Sortino', align: 'right', render: (r) => fmtNum(r.metrics.sortino_ratio ?? 0) },
               { key: 'oos', label: 'OOS', align: 'right', render: renderOos },
               { key: 'robustness', label: 'Robustness', render: renderRobustness },
             ]}

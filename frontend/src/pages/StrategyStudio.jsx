@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { get, post, api, fmtMoney, fmtPct, fmtNum, fmtTime } from '../api.js';
 import { useApp, saveStrategy } from '../context.js';
@@ -9,7 +9,7 @@ import CodeEditor from '../components/CodeEditor.jsx';
 const EMPTY_STRATEGY_SKELETON = `def generate_signals(df, indicators, **params):
     """Return bar signals in {-1, 0, 1} or a dict:
       {'signals': [...], 'exit_signals': [...], 'stop_loss_pct': 0.5, 'target_pct': 1.0}
-    'df' provides OHLCV series; 'indicators' maps registered indicator names to their Series.
+    'df' provides OHLCV series; 'indicators' maps registered indicator names to Series or IndicatorOutput dicts.
     """
     n = len(df)
     return {
@@ -34,6 +34,27 @@ function blankDraft() {
     code: EMPTY_STRATEGY_SKELETON,
     status: 'new',
     registered: false,
+    has_draft_changes: false,
+  };
+}
+
+function draftFromItem(item) {
+  return {
+    id: item.id,
+    name: item.name,
+    version: item.version || '1.0.0',
+    description: item.description || '',
+    direction: item.direction || 'both',
+    stop_loss_pct: item.stop_loss_pct ?? 0.5,
+    target_pct: item.target_pct ?? 1.0,
+    entry_notes: item.entry_notes || '',
+    exit_notes: item.exit_notes || '',
+    linked_indicators: [...(item.linked_indicators || [])],
+    params: (item.params || []).map((p) => ({ ...p })),
+    code: item.code || EMPTY_STRATEGY_SKELETON,
+    status: item.status,
+    registered: Boolean(item.registered),
+    has_draft_changes: Boolean(item.has_draft_changes),
   };
 }
 
@@ -48,7 +69,32 @@ export default function StrategyStudio() {
   const [savedSnapshot, setSavedSnapshot] = useState(JSON.stringify(blankDraft()));
   const [validation, setValidation] = useState(null);
   const [notice, setNotice] = useState(null);
+  const [pendingNav, setPendingNav] = useState(null);
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const inFlightRef = useRef(false);
   const { error, busy, run, setError } = useAsync();
+
+  const applySelection = (item) => {
+    const copy = draftFromItem(item);
+    setDraft(copy);
+    setSavedSnapshot(JSON.stringify(copy));
+    setValidation(item.last_validation || null);
+    setNotice(null);
+    setError(null);
+    setPendingNav(null);
+    setPendingDelete(null);
+  };
+
+  const applyNewBlank = () => {
+    const fresh = blankDraft();
+    setDraft(fresh);
+    setSavedSnapshot(JSON.stringify(fresh));
+    setValidation(null);
+    setNotice(null);
+    setError(null);
+    setPendingNav(null);
+    setPendingDelete(null);
+  };
 
   const loadAll = async (selectId = null) => {
     const [sRes, iRes] = await Promise.all([
@@ -60,7 +106,7 @@ export default function StrategyStudio() {
     setRegIndicators((iRes.indicators || []).filter((i) => i.available));
     if (selectId) {
       const found = list.find((s) => s.id === selectId);
-      if (found) selectItem(found);
+      if (found) applySelection(found);
     }
     return list;
   };
@@ -68,44 +114,34 @@ export default function StrategyStudio() {
   useEffect(() => {
     run(async () => {
       const list = await loadAll();
-      if (list.length > 0 && !draft.id) selectItem(list[0]);
+      if (list.length > 0 && !draft.id) applySelection(list[0]);
     });
   }, []);
 
-  const selectItem = (item) => {
-    const copy = {
-      id: item.id,
-      name: item.name,
-      version: item.version || '1.0.0',
-      description: item.description || '',
-      direction: item.direction || 'both',
-      stop_loss_pct: item.stop_loss_pct ?? 0.5,
-      target_pct: item.target_pct ?? 1.0,
-      entry_notes: item.entry_notes || '',
-      exit_notes: item.exit_notes || '',
-      linked_indicators: [...(item.linked_indicators || [])],
-      params: (item.params || []).map((p) => ({ ...p })),
-      code: item.code || EMPTY_STRATEGY_SKELETON,
-      status: item.status,
-      registered: item.registered,
-    };
-    setDraft(copy);
-    setSavedSnapshot(JSON.stringify(copy));
-    setValidation(item.last_validation || null);
-    setNotice(null);
-    setError(null);
-  };
-
-  const newStrategy = () => {
-    const fresh = blankDraft();
-    setDraft(fresh);
-    setSavedSnapshot(JSON.stringify(fresh));
-    setValidation(null);
-    setNotice(null);
-    setError(null);
-  };
-
   const dirty = JSON.stringify(draft) !== savedSnapshot;
+
+  const requestSelectItem = (item) => {
+    if (item.id === draft.id) return;
+    if (dirty) {
+      setPendingNav({ type: 'select', item });
+      return;
+    }
+    applySelection(item);
+  };
+
+  const requestNewStrategy = () => {
+    if (dirty) {
+      setPendingNav({ type: 'new' });
+      return;
+    }
+    applyNewBlank();
+  };
+
+  const confirmPendingNav = () => {
+    if (!pendingNav) return;
+    if (pendingNav.type === 'new') applyNewBlank();
+    else if (pendingNav.type === 'select' && pendingNav.item) applySelection(pendingNav.item);
+  };
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -145,34 +181,45 @@ export default function StrategyStudio() {
     setDraft((d) => ({ ...d, params: d.params.filter((_, i) => i !== idx) }));
   };
 
-  const persistDraft = async () => {
-    const payload = {
-      name: draft.name,
-      version: draft.version,
-      description: draft.description,
-      direction: draft.direction,
-      stop_loss_pct: Number(draft.stop_loss_pct),
-      target_pct: Number(draft.target_pct),
-      entry_notes: draft.entry_notes,
-      exit_notes: draft.exit_notes,
-      linked_indicators: draft.linked_indicators,
-      params: draft.params,
-      code: draft.code,
-    };
-    if (draft.id) {
-      return api(`/api/studio/strategies/${draft.id}`, { method: 'PUT', body: payload });
-    }
-    return post('/api/studio/strategies', payload);
-  };
-
-  const saveDraft = () => run(async () => {
-    setNotice(null);
-    const saved = await persistDraft();
-    await loadAll(saved.id);
-    setNotice(`Saved draft strategy '${saved.name}' v${saved.version}. Click Update Strategy to validate and register it in the Research Agent catalogue.`);
+  const buildPayload = () => ({
+    name: draft.name,
+    version: draft.version,
+    description: draft.description,
+    direction: draft.direction,
+    stop_loss_pct: Number(draft.stop_loss_pct),
+    target_pct: Number(draft.target_pct),
+    entry_notes: draft.entry_notes,
+    exit_notes: draft.exit_notes,
+    linked_indicators: draft.linked_indicators,
+    params: draft.params,
+    code: draft.code,
   });
 
-  const validateCode = (syntaxOnly = false) => run(async () => {
+  const guardExclusive = async (fn) => {
+    if (inFlightRef.current) return undefined;
+    inFlightRef.current = true;
+    try {
+      return await run(fn);
+    } finally {
+      inFlightRef.current = false;
+    }
+  };
+
+  const saveDraft = () => guardExclusive(async () => {
+    setNotice(null);
+    const payload = buildPayload();
+    const saved = draft.id
+      ? await api(`/api/studio/strategies/${draft.id}`, { method: 'PUT', body: payload })
+      : await post('/api/studio/strategies', payload);
+    await loadAll(saved.id);
+    setNotice(
+      saved.registered
+        ? `Saved draft edits for '${saved.name}' v${saved.version}. Active registry keeps the previous validated strategy until you click Update Strategy.`
+        : `Saved draft strategy '${saved.name}' v${saved.version}. Click Update Strategy to validate and register it in the Research Agent catalogue.`
+    );
+  });
+
+  const validateCode = (syntaxOnly = false) => guardExclusive(async () => {
     setNotice(null);
     const res = await post('/api/studio/strategies/validate', {
       code: draft.code,
@@ -187,38 +234,56 @@ export default function StrategyStudio() {
     setValidation(res);
     if (!res.ok) {
       setError(`${res.error?.type || 'ValidationError'} on line ${res.error?.line || 1}: ${res.error?.message}`);
+    } else if (syntaxOnly) {
+      setNotice('Python AST syntax and sandbox safety checks passed.');
+    } else {
+      setNotice(`Simulated cleanly on ${res.bars} bars (${res.metrics?.trades ?? 0} trades). Click Update Strategy to register.`);
     }
   });
 
-  const updateStrategy = () => run(async () => {
+  const updateStrategy = () => guardExclusive(async () => {
     setNotice(null);
-    const saved = await persistDraft();
-    const res = await post(`/api/studio/strategies/${saved.id}/update`, {
-      name: draft.name,
-      version: draft.version,
-      description: draft.description,
-      direction: draft.direction,
-      stop_loss_pct: Number(draft.stop_loss_pct),
-      target_pct: Number(draft.target_pct),
-      entry_notes: draft.entry_notes,
-      exit_notes: draft.exit_notes,
-      linked_indicators: draft.linked_indicators,
-      params: draft.params,
-      code: draft.code,
-      dataset_id: datasetId,
-    });
-    setValidation(res.validation);
-    await loadAll(res.strategy.id);
-    setNotice(res.message);
+    const payload = buildPayload();
+    let targetId = draft.id;
+
+    if (!targetId) {
+      const created = await post('/api/studio/strategies', payload);
+      targetId = created.id;
+      const committed = draftFromItem(created);
+      setDraft(committed);
+      setSavedSnapshot(JSON.stringify(committed));
+      setItems((prev) => [...prev, created]);
+    }
+
+    try {
+      const res = await post(`/api/studio/strategies/${targetId}/update`, {
+        ...payload,
+        dataset_id: datasetId,
+      });
+      setValidation(res.validation);
+      await loadAll(res.strategy.id);
+      setNotice(res.message);
+    } catch (err) {
+      if (err.data?.validation) {
+        setValidation(err.data.validation);
+      }
+      const sRes = await get('/api/studio/strategies').catch(() => null);
+      if (sRes?.items) setItems(sRes.items);
+      if (err.data?.preserved_working_version) {
+        setNotice('Validation failed; the previous working registered strategy remains active. Fix the editor code below and retry Update Strategy.');
+      }
+      throw err;
+    }
   });
 
-  const deleteStrategy = (item) => run(async () => {
+  const confirmDeleteStrategy = (item) => guardExclusive(async () => {
     setNotice(null);
+    setPendingDelete(null);
     await api(`/api/studio/strategies/${item.id}`, { method: 'DELETE' });
     const remaining = await loadAll();
     if (draft.id === item.id) {
-      if (remaining.length) selectItem(remaining[0]);
-      else newStrategy();
+      if (remaining.length) applySelection(remaining[0]);
+      else applyNewBlank();
     }
     setNotice(`Deleted strategy '${item.name}' and removed it from the strategy registry.`);
   });
@@ -247,21 +312,45 @@ export default function StrategyStudio() {
         <div>
           <h1>Strategy Studio</h1>
           <div className="muted">
-            Code-first custom trading strategies. Author entry, exit, stop-loss, and take-profit logic in Python, test on historical candles, and register for autonomous discovery.
+            Code-first custom trading strategies. Combine OHLCV data with numerical, multi-output, or signal indicators in Python and simulate on historical candles.
           </div>
         </div>
         <div className="card-actions">
-          <span className="badge info">Implemented: Python 3.11 Sandbox + Bar-by-Bar Engine</span>
-          <button className="primary" onClick={newStrategy}>+ New Strategy</button>
+          <span className="badge info">Python 3.11 Sandbox + Bar-by-Bar Engine</span>
+          <button className="primary" onClick={requestNewStrategy}>+ New Strategy</button>
         </div>
       </div>
 
       <div className="grid stats" style={{ marginBottom: 14 }}>
         <Stat label="Custom Strategies" value={items.length} hint="unlimited user-owned registry" />
         <Stat label="Registered & Active" value={registeredCount} tone="good" hint="visible to Research Agent" />
-        <Stat label="Registered Indicators" value={regIndicators.length} hint="available to import in strategy code" />
+        <Stat label="Registered Indicators" value={regIndicators.length} hint="available via indicators[name]" />
         <Stat label="Test Dataset" value={datasetId ? `#${datasetId}` : 'Probe (400 bars)'} hint={datasetId ? 'train split historical candles' : 'import CSV or synthetic data'} />
       </div>
+
+      {pendingNav && (
+        <div className="info-box" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, borderColor: 'var(--warn)' }}>
+          <span>
+            You have unsaved edits in <strong>{draft.name || 'New Strategy'}</strong>. Discard changes and switch?
+          </span>
+          <div className="card-actions">
+            <button type="button" onClick={() => setPendingNav(null)}>Stay &amp; Keep Editing</button>
+            <button type="button" className="primary" onClick={confirmPendingNav}>Discard Unsaved Changes</button>
+          </div>
+        </div>
+      )}
+
+      {pendingDelete && (
+        <div className="error-box" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+          <span>
+            Delete strategy <strong className="mono">{pendingDelete.name}</strong> (ID #{pendingDelete.id})?
+          </span>
+          <div className="card-actions">
+            <button type="button" onClick={() => setPendingDelete(null)}>Cancel</button>
+            <button type="button" className="primary" onClick={() => confirmDeleteStrategy(pendingDelete)}>Confirm Delete</button>
+          </div>
+        </div>
+      )}
 
       <ErrorBox error={error} />
       {notice && <div className="info-box">{notice}</div>}
@@ -285,7 +374,7 @@ export default function StrategyStudio() {
 
           {filtered.length === 0 && (
             <div className="empty" style={{ padding: 14 }}>
-              No custom strategies yet. Click <strong>+ New Strategy</strong> to write your own strategy logic.
+              No custom strategies match. Click <strong>+ New Strategy</strong> to write your own strategy logic.
             </div>
           )}
 
@@ -293,22 +382,27 @@ export default function StrategyStudio() {
             <div
               key={item.id}
               className={`studio-item ${draft.id === item.id ? 'active' : ''}`}
-              onClick={() => selectItem(item)}
+              onClick={() => requestSelectItem(item)}
             >
               <div className="studio-item-head">
                 <strong className="mono">{item.name}</strong>
                 <Badge status={item.registered ? 'completed' : item.status === 'error' ? 'error' : 'pending'} />
               </div>
               <div className="muted" style={{ fontSize: 12 }}>
-                v{item.version} · {item.direction} · SL {item.stop_loss_pct}% / TP {item.target_pct}%
+                #{item.id} · v{item.version} · {item.direction} · SL {item.stop_loss_pct}% / TP {item.target_pct}%
               </div>
               {item.description && <div className="muted" style={{ fontSize: 11 }}>{item.description}</div>}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
-                <small>{item.registered ? 'In Agent Catalogue' : 'Draft only'}</small>
+                <small>
+                  {item.registered
+                    ? (item.has_draft_changes ? 'Registered (draft pending)' : 'In Agent Catalogue')
+                    : (item.status === 'error' ? 'Needs fix' : 'Draft only')}
+                </small>
                 <button
+                  type="button"
                   className="ghost"
                   style={{ padding: '2px 7px', fontSize: 11, color: 'var(--bad)' }}
-                  onClick={(e) => { e.stopPropagation(); deleteStrategy(item); }}
+                  onClick={(e) => { e.stopPropagation(); setPendingDelete(item); }}
                 >
                   Delete
                 </button>
@@ -319,22 +413,32 @@ export default function StrategyStudio() {
 
         <div className="studio-workspace">
           <Card
-            title={draft.id ? `Editing: ${draft.name}` : 'New Custom Strategy'}
+            title={
+              draft.id
+                ? `Editing ID #${draft.id}: ${draft.name || '(unnamed)'}${dirty ? ' • Unsaved changes' : ''}`
+                : `Creating New Strategy${dirty ? ' • Unsaved' : ''}`
+            }
             actions={
               <>
-                <button disabled={busy} onClick={saveDraft}>Save Draft</button>
-                <button disabled={busy} onClick={() => validateCode(true)}>Validate Syntax</button>
-                <button disabled={busy} onClick={() => validateCode(false)}>Test Execution</button>
-                {draft.id && draft.registered && <button onClick={openInBacktest}>Open in Backtest</button>}
-                <button className="primary" disabled={busy} onClick={updateStrategy}>Update Strategy</button>
+                <button type="button" disabled={busy} onClick={saveDraft}>Save Draft</button>
+                <button type="button" disabled={busy} onClick={() => validateCode(true)}>Validate Syntax</button>
+                <button type="button" disabled={busy} onClick={() => validateCode(false)}>Test Execution</button>
+                {draft.id && draft.registered && <button type="button" onClick={openInBacktest}>Open in Backtest</button>}
+                <button type="button" className="primary" disabled={busy} onClick={updateStrategy}>Update Strategy</button>
               </>
             }
           >
+            {draft.has_draft_changes && (
+              <div className="info-box" style={{ marginBottom: 10, borderColor: 'var(--warn)' }}>
+                This strategy has saved draft edits not yet validated. Click <strong>Update Strategy</strong> to promote them to the active catalogue.
+              </div>
+            )}
+
             <div className="form-grid" style={{ marginBottom: 12 }}>
               <Field label="Strategy Name">
                 <input
                   className="mono"
-                  placeholder="e.g. breakout_regime_v1"
+                  placeholder="e.g. rsi_mean_reversion_v1"
                   value={draft.name}
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                 />
@@ -402,7 +506,7 @@ export default function StrategyStudio() {
             <div style={{ marginBottom: 12 }}>
               <div className="studio-toolbar" style={{ marginBottom: 6 }}>
                 <span style={{ color: 'var(--muted)', fontSize: 13 }}>
-                  Linked Custom Indicators ({draft.linked_indicators.length} selected from dynamic registry)
+                  Linked Custom Indicators ({draft.linked_indicators.length} selected) — numeric/multi indicators expose raw Series or dict outputs via <code>indicators[&quot;name&quot;]</code>
                 </span>
               </div>
               {regIndicators.length === 0 ? (
@@ -419,8 +523,10 @@ export default function StrategyStudio() {
                         key={ind.name}
                         className={`tab ${active ? 'active' : ''}`}
                         onClick={() => toggleLinkedIndicator(ind.name)}
+                        title={`Outputs: ${(ind.outputs || ['signal']).join(', ')}`}
                       >
-                        {active ? '✓ ' : '+ '}<span className="mono">{ind.name}</span>
+                        {active ? '✓ ' : '+ '}<span className="mono">{ind.name}</span>{' '}
+                        <span className="muted" style={{ fontSize: 11 }}>({ind.output_type || 'auto'})</span>
                       </button>
                     );
                   })}
@@ -477,32 +583,30 @@ export default function StrategyStudio() {
             )}
             {validation && !validation.ok && (
               <div className="error-box">
-                <strong>{validation.error?.type || 'Error'}</strong> (line {validation.error?.line || 1}): {validation.error?.message}
+                <strong>{validation.error?.type || 'Error'}</strong> (stage: {validation.stage || 'runtime'}, line {validation.error?.line || 1}): {validation.error?.message}
               </div>
             )}
             {validation && validation.ok && validation.stage === 'syntax' && (
               <div className="info-box">Python AST syntax and sandbox safety checks passed.</div>
             )}
             {validation && validation.ok && validation.stage === 'executed' && (
-              <>
-                <div className="grid stats" style={{ marginBottom: 12 }}>
-                  <Stat label="Execution Time" value={`${validation.execution_ms} ms`} hint={validation.data_source} />
-                  <Stat label="Long / Short Signals" value={`${validation.signal_counts?.long ?? 0} / ${validation.signal_counts?.short ?? 0}`} />
-                  {validation.metrics && (
-                    <>
-                      <Stat label="Simulated Trades" value={validation.metrics.trades} />
-                      <Stat
-                        label="Net Profit"
-                        value={fmtMoney(validation.metrics.net_profit)}
-                        tone={validation.metrics.net_profit >= 0 ? 'good' : 'bad'}
-                      />
-                      <Stat label="Win Rate" value={fmtPct(validation.metrics.win_rate)} />
-                      <Stat label="Sharpe Ratio" value={fmtNum(validation.metrics.sharpe_ratio)} />
-                      <Stat label="Max Drawdown" value={fmtPct(validation.metrics.max_drawdown_pct)} tone="bad" />
-                    </>
-                  )}
-                </div>
-              </>
+              <div className="grid stats" style={{ marginBottom: 12 }}>
+                <Stat label="Execution Time" value={`${validation.execution_ms} ms`} hint={validation.data_source} />
+                <Stat label="Long / Short Signals" value={`${validation.signal_counts?.long ?? 0} / ${validation.signal_counts?.short ?? 0}`} />
+                {validation.metrics && (
+                  <>
+                    <Stat label="Simulated Trades" value={validation.metrics.trades} />
+                    <Stat
+                      label="Net Profit"
+                      value={fmtMoney(validation.metrics.net_profit)}
+                      tone={validation.metrics.net_profit >= 0 ? 'good' : 'bad'}
+                    />
+                    <Stat label="Win Rate" value={fmtPct(validation.metrics.win_rate)} />
+                    <Stat label="Sharpe Ratio" value={fmtNum(validation.metrics.sharpe_ratio)} />
+                    <Stat label="Max Drawdown" value={fmtPct(validation.metrics.max_drawdown_pct)} tone="bad" />
+                  </>
+                )}
+              </div>
             )}
             {draft.id && items.find((s) => s.id === draft.id)?.last_validated_at && (
               <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>

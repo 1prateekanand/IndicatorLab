@@ -4,8 +4,10 @@ import { useApp } from '../context.js';
 import { Card, Badge, Field, ErrorBox, Table, useAsync } from '../components/ui.jsx';
 import Plot from '../components/Plot.jsx';
 
+const ALL_TIMEFRAMES = ['1m', '5m', '10m', '1H', '4H'];
+
 export default function Optimization() {
-  const { datasetId } = useApp();
+  const { datasets, datasetId } = useApp();
   const [options, setOptions] = useState(null);
   const [runs, setRuns] = useState([]);
   const [selected, setSelected] = useState(null);
@@ -14,6 +16,9 @@ export default function Optimization() {
   const [importance, setImportance] = useState(null);
   const [form, setForm] = useState({
     study_name: 'study_1',
+    timeframes: ['1m', '5m'],
+    start_date: '',
+    end_date: '',
     n_trials: 40,
     duration_limit_s: 0,
     sampler: 'tpe',
@@ -27,6 +32,10 @@ export default function Optimization() {
     seed: 42,
   });
   const { error, busy, run } = useAsync();
+
+  const activeDs = datasets.find((d) => d.id === Number(datasetId)) || null;
+  const minBoundDate = activeDs?.start_ts ? activeDs.start_ts.slice(0, 10) : '';
+  const maxBoundDate = activeDs?.end_ts ? activeDs.end_ts.slice(0, 10) : '';
 
   const refresh = async () => {
     try {
@@ -49,10 +58,20 @@ export default function Optimization() {
     get(`/api/analytics/optuna/${selected}/importance`).then(setImportance).catch(() => setImportance(null));
   }, [selected]);
 
+  const toggleTf = (tf) => {
+    setForm((prev) => {
+      const exists = prev.timeframes.includes(tf);
+      const next = exists ? prev.timeframes.filter((x) => x !== tf) : [...prev.timeframes, tf];
+      return { ...prev, timeframes: next.length ? next : [tf] };
+    });
+  };
+
   const start = () => run(async () => {
     const r = await post('/api/optimization/start', {
       dataset_id: datasetId,
       ...form,
+      start_date: form.start_date || null,
+      end_date: form.end_date || null,
       n_trials: Number(form.n_trials),
       duration_limit_s: Number(form.duration_limit_s),
       max_indicators: Number(form.max_indicators),
@@ -76,14 +95,35 @@ export default function Optimization() {
         <div>
           <h1>Optimization</h1>
           <div className="muted">
-            Systematic combination &amp; parameter search over all registered indicators ({cat.indicators}) and strategies ({cat.strategies}) with pruning and resource budgets.
+            Systematic multi-timeframe combination &amp; parameter search over all registered indicators ({cat.indicators}) and strategies ({cat.strategies}) with pruning and resource budgets.
           </div>
         </div>
       </div>
       <ErrorBox error={error} />
       <Card title="New study" actions={<button className="primary" disabled={busy || active || !datasetId} onClick={start}>Start study</button>}>
+        <div style={{ marginBottom: 12 }}>
+          <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>Study Timeframes</div>
+          <div className="pill-row">
+            {ALL_TIMEFRAMES.map((tf) => (
+              <button
+                key={tf}
+                type="button"
+                className={form.timeframes.includes(tf) ? 'primary' : ''}
+                onClick={() => toggleTf(tf)}
+              >
+                {tf}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="form-grid">
           <Field label="Study name"><input value={form.study_name} onChange={set('study_name')} /></Field>
+          <Field label="Start Date (optional)" hint={minBoundDate ? `min ${minBoundDate}` : ''}>
+            <input type="date" min={minBoundDate} max={maxBoundDate} value={form.start_date} onChange={set('start_date')} />
+          </Field>
+          <Field label="End Date (optional)" hint={maxBoundDate ? `max ${maxBoundDate}` : ''}>
+            <input type="date" min={minBoundDate} max={maxBoundDate} value={form.end_date} onChange={set('end_date')} />
+          </Field>
           <Field label="Trials"><input type="number" min="1" value={form.n_trials} onChange={set('n_trials')} /></Field>
           <Field label="Duration budget (sec)" hint="0 = unlimited"><input type="number" min="0" value={form.duration_limit_s} onChange={set('duration_limit_s')} /></Field>
           <Field label="Sampler / Algorithm">
@@ -122,6 +162,7 @@ export default function Optimization() {
           columns={[
             { key: 'study_name', label: 'Study' },
             { key: 'status', label: 'Status', render: (r) => <Badge status={r.live?.alive ? r.live.status : r.status} /> },
+            { key: 'timeframes', label: 'Timeframes', render: (r) => (r.config?.timeframes || ['1m']).join(', ') },
             { key: 'sampler', label: 'Sampler', render: (r) => (r.config.sampler || '').toUpperCase() },
             { key: 'objective', label: 'Objective', render: (r) => r.config.objective },
             { key: 'n_trials', label: 'Trials', align: 'right', render: (r) => r.config.n_trials },

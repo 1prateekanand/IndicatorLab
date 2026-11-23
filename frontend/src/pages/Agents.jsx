@@ -7,15 +7,21 @@ const NAMES = {
   research_agent: 'Strategy Research Agent (Agent 1)',
   evaluation_agent: 'Evaluation & Ranking Agent (Agent 2)',
 };
+const ALL_TIMEFRAMES = ['1m', '5m', '10m', '1H', '4H'];
 
 export default function Agents() {
-  const { datasetId } = useApp();
+  const { datasets, datasetId } = useApp();
   const [status, setStatus] = useState(null);
   const [logs, setLogs] = useState({});
   const [evalSnap, setEvalSnap] = useState(null);
+  const [regIndicators, setRegIndicators] = useState([]);
   const [form, setForm] = useState({
     algorithm: 'full_cycle',
     objective: 'net_profit',
+    timeframes: ['1m', '5m', '1H'],
+    start_date: '',
+    end_date: '',
+    indicator_names: [],
     cycles: 1,
     n_trials: 30,
     duration_limit_s: 0,
@@ -27,10 +33,18 @@ export default function Agents() {
     hill_climb_steps: 20,
     tuning_trials: 30,
     walk_forward_top_k: 5,
+    initial_capital: 10000000,
+    brokerage_per_order: 20,
+    charges_pct: 0.0005,
+    slippage_points: 0.5,
     seed: 42,
   });
   const { error, busy, run } = useAsync();
   const lastId = useRef({});
+
+  const activeDs = datasets.find((d) => d.id === Number(datasetId)) || null;
+  const minBoundDate = activeDs?.start_ts ? activeDs.start_ts.slice(0, 10) : '';
+  const maxBoundDate = activeDs?.end_ts ? activeDs.end_ts.slice(0, 10) : '';
 
   const refresh = async () => {
     try {
@@ -50,12 +64,38 @@ export default function Agents() {
 
   useEffect(() => {
     refresh();
+    get('/api/indicators').then((r) => setRegIndicators((r.indicators || []).filter((i) => i.available))).catch(() => {});
     const t = setInterval(refresh, 2000);
     return () => clearInterval(t);
   }, []);
 
+  const toggleTf = (tf) => {
+    setForm((prev) => {
+      const exists = prev.timeframes.includes(tf);
+      const next = exists ? prev.timeframes.filter((x) => x !== tf) : [...prev.timeframes, tf];
+      return { ...prev, timeframes: next.length ? next : [tf] };
+    });
+  };
+
+  const toggleIndFilter = (name) => {
+    setForm((prev) => {
+      const exists = prev.indicator_names.includes(name);
+      return {
+        ...prev,
+        indicator_names: exists
+          ? prev.indicator_names.filter((x) => x !== name)
+          : [...prev.indicator_names, name],
+      };
+    });
+  };
+
   const start = () => run(async () => {
-    await post('/api/agents/start', { dataset_id: datasetId, ...form });
+    await post('/api/agents/start', {
+      dataset_id: datasetId,
+      ...form,
+      start_date: form.start_date || null,
+      end_date: form.end_date || null,
+    });
     await refresh();
   });
   const control = (name, action) => run(async () => { await post(`/api/agents/${name}/${action}`); await refresh(); });
@@ -72,25 +112,25 @@ export default function Agents() {
         <div>
           <h1>AI Agents</h1>
           <div className="muted">
-            Autonomous combination discovery across all registered indicators and strategies. Agents automatically detect newly registered components without manual reconfiguration.
+            Autonomous multi-timeframe combination discovery across registered custom indicators and strategies. Agents explore k=1..N combinations with strict chronological train/validation splits.
           </div>
         </div>
         <div className="card-actions">
-          <span className="badge info">Dynamic Catalogue · No Fixed Component Limits</span>
+          <span className="badge info">Dynamic Catalogue · Multi-Timeframe Search</span>
         </div>
       </div>
 
       <div className="grid stats" style={{ marginBottom: 14 }}>
         <Stat label="Registered Indicators" value={cat.indicators} tone={cat.indicators ? 'good' : ''} hint="available to Agent 1" />
         <Stat label="Registered Strategies" value={cat.strategies} tone={cat.strategies ? 'good' : ''} hint="available to Agent 1" />
-        <Stat label="Combination Ceiling" value={form.max_indicators === 0 ? 'Unlimited' : `Up to ${form.max_indicators}`} hint="configurable search budget" />
-        <Stat label="Time Budget" value={form.duration_limit_s > 0 ? `${form.duration_limit_s}s` : 'Unlimited'} hint="stops cleanly when reached" />
+        <Stat label="Selected Timeframes" value={form.timeframes.join(', ')} hint="NSE session-anchored candles" />
+        <Stat label="Combination Ceiling" value={form.max_indicators === 0 ? 'Unlimited' : `Up to ${form.max_indicators}`} hint="k=1, 2, 3, 4+ indicators" />
       </div>
 
       <ErrorBox error={error} />
 
       <Card
-        title="Combination Discovery &amp; Resource Budget Configuration"
+        title="Multi-Timeframe Discovery &amp; Cost Budget Configuration"
         actions={
           <button
             className="primary"
@@ -101,6 +141,50 @@ export default function Agents() {
           </button>
         }
       >
+        <div style={{ marginBottom: 12 }}>
+          <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>Search Timeframes</div>
+          <div className="pill-row">
+            {ALL_TIMEFRAMES.map((tf) => (
+              <button
+                key={tf}
+                type="button"
+                className={form.timeframes.includes(tf) ? 'primary' : ''}
+                onClick={() => toggleTf(tf)}
+              >
+                {tf}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {regIndicators.length > 0 && (
+          <div style={{ marginBottom: 12 }}>
+            <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+              Indicator Search Space ({form.indicator_names.length ? `${form.indicator_names.length} selected` : 'All registered indicators active'})
+            </div>
+            <div className="pill-row">
+              {regIndicators.map((ind) => {
+                const active = form.indicator_names.includes(ind.name);
+                return (
+                  <button
+                    key={ind.name}
+                    type="button"
+                    className={`tab ${active ? 'active' : ''}`}
+                    onClick={() => toggleIndFilter(ind.name)}
+                  >
+                    {ind.name}
+                  </button>
+                );
+              })}
+              {form.indicator_names.length > 0 && (
+                <button type="button" className="ghost" onClick={() => setForm({ ...form, indicator_names: [] })}>
+                  Reset to All
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="form-grid">
           <Field label="Search Algorithm">
             <select value={form.algorithm} onChange={setStr('algorithm')}>
@@ -117,10 +201,17 @@ export default function Agents() {
             <select value={form.objective} onChange={setStr('objective')}>
               <option value="net_profit">Net Profit</option>
               <option value="sharpe_ratio">Sharpe Ratio</option>
+              <option value="sortino_ratio">Sortino Ratio</option>
               <option value="profit_factor">Profit Factor</option>
               <option value="recovery_factor">Risk-Adjusted (Recovery Factor)</option>
               <option value="min_drawdown">Lowest Max Drawdown</option>
             </select>
+          </Field>
+          <Field label="Start Date (optional)" hint={minBoundDate ? `min ${minBoundDate}` : ''}>
+            <input type="date" min={minBoundDate} max={maxBoundDate} value={form.start_date} onChange={setStr('start_date')} />
+          </Field>
+          <Field label="End Date (optional)" hint={maxBoundDate ? `max ${maxBoundDate}` : ''}>
+            <input type="date" min={minBoundDate} max={maxBoundDate} value={form.end_date} onChange={setStr('end_date')} />
           </Field>
           <Field label="Trial Budget" hint="0 = derived from cycles">
             <input type="number" min="0" value={form.n_trials} onChange={setNum('n_trials')} />
@@ -131,29 +222,32 @@ export default function Agents() {
           <Field label="Max Indicators / Combo" hint="0 = unlimited (all registered)">
             <input type="number" min="0" value={form.max_indicators} onChange={setNum('max_indicators')} />
           </Field>
-          <Field label="CPU Throttle (%)" hint="worker back-off limit">
-            <input type="number" min="10" max="100" value={form.cpu_limit_pct} onChange={setNum('cpu_limit_pct')} />
+          <Field label="Initial Capital">
+            <input type="number" min="1000" value={form.initial_capital} onChange={setNum('initial_capital')} />
           </Field>
-          <Field label="Memory Limit (MB)" hint="sandbox RLIMIT_AS">
-            <input type="number" min="64" max="4096" step="64" value={form.ram_limit_mb} onChange={setNum('ram_limit_mb')} />
+          <Field label="Brokerage / Order">
+            <input type="number" step="0.5" min="0" value={form.brokerage_per_order} onChange={setNum('brokerage_per_order')} />
           </Field>
-          <Field label="Cycles (0 = continuous)">
-            <input type="number" min="0" value={form.cycles} onChange={setNum('cycles')} />
+          <Field label="Taxes &amp; Charges (frac)">
+            <input type="number" step="0.0001" min="0" value={form.charges_pct} onChange={setNum('charges_pct')} />
           </Field>
-          <Field label="Population Size">
-            <input type="number" min="4" value={form.population_size} onChange={setNum('population_size')} />
-          </Field>
-          <Field label="GA Generations">
-            <input type="number" min="1" value={form.generations} onChange={setNum('generations')} />
+          <Field label="Slippage (points)">
+            <input type="number" step="0.1" min="0" value={form.slippage_points} onChange={setNum('slippage_points')} />
           </Field>
           <Field label="Walk-Forward Top K">
             <input type="number" min="1" value={form.walk_forward_top_k} onChange={setNum('walk_forward_top_k')} />
+          </Field>
+          <Field label="CPU Throttle (%)">
+            <input type="number" min="10" max="100" value={form.cpu_limit_pct} onChange={setNum('cpu_limit_pct')} />
+          </Field>
+          <Field label="Memory Limit (MB)">
+            <input type="number" min="64" max="4096" step="64" value={form.ram_limit_mb} onChange={setNum('ram_limit_mb')} />
           </Field>
           <Field label="Random Seed">
             <input type="number" value={form.seed} onChange={setNum('seed')} />
           </Field>
         </div>
-        {!datasetId && <div className="info-box">Import or generate a dataset from the top bar first.</div>}
+        {!datasetId && <div className="info-box">Import or generate a dataset from Market Data or the top bar first.</div>}
         {datasetId && cat.indicators === 0 && cat.strategies === 0 && (
           <div className="info-box">
             No custom indicators or strategies are registered yet. Author and click <strong>Update Indicator</strong> or <strong>Update Strategy</strong> in the Studios first.
@@ -176,6 +270,8 @@ export default function Agents() {
             }
           >
             <dl className="kv">
+              <dt>Current timeframe</dt><dd>{a.current_timeframe || '—'}</dd>
+              <dt>Current combination</dt><dd className="mono">{a.current_combination || '—'}</dd>
               <dt>Current task</dt><dd>{a.current_task || '—'}</dd>
               <dt>Algorithm</dt><dd>{a.algorithm || '—'}</dd>
               <dt>Trials processed</dt><dd>{a.trials_processed}</dd>
